@@ -15,11 +15,12 @@ There are multiple ways to start coding OpenShift.
 
 == Download from GitHub
 
-The OpenShift team periodically publishes binaries to Github on https://github.com/openshift/origin/releases[the Releases page].  These are precompiled Linux 64bit binaries and will not work on other platforms. You'll need Docker installed on your local system (see https://docs.docker.com/installation/#installation[the installation page] if you've never installed Docker before).
+The OpenShift team periodically publishes binaries to Github on https://github.com/openshift/origin/releases[the Releases page].  These are Linux, Windows, or Mac OS X 64bit binaries (note that Mac and Windows are client only). You'll need Docker installed on your local system (see https://docs.docker.com/installation/#installation[the installation page] if you've never installed Docker before).
 
-The tar file contains a single binary `openshift` which is the all-in-one OpenShift installation.
+The tar file for each platform contains a single binary `openshift` which is the all-in-one OpenShift installation.
 
-* Use `openshift start` to launch the server
+* Use `sudo openshift start` to launch the server.  Root access is required to create services due to the need to modify IPTables.  See issue: https://github.com/GoogleCloudPlatform/kubernetes/issues/1859.
+* Use `osc -h <server> ...` to connect to an OpenShift server
 * Use `openshift help` to see more about the commands in the binary
 
 == Develop locally on your host
@@ -31,8 +32,9 @@ You can develop OpenShift 3 on Windows, Mac, or Linux, but you'll need Docker in
 
 Here's how to get set up:
 
-1. For Go and optionally also Docker, follow the links below to get to installation information for these tools: +
+1. For Go, Git and optionally also Docker, follow the links below to get to installation information for these tools: +
 ** http://golang.org/doc/install[Installing Go]
+** http://git-scm.com/book/en/v2/Getting-Started-Installing-Git[Installing Git]
 ** https://docs.docker.com/installation/#installation[Installing Docker]
 2. Next, create a Go workspace directory: +
 +
@@ -53,34 +55,65 @@ To facilitate rapid development we've put together a Vagrantfile you can use to 
 
 1.  http://www.vagrantup.com/downloads[Install Vagrant]
 
-2.  Clone the project and change into the directory:
+2.  https://www.virtualbox.org/wiki/Downloads[Install VirtualBox] (Ex: `yum install VirtualBox`)
 
+3.  Clone the project and change into the directory:
+
+        $ mkdir -p $GOPATH/src/github.com/openshift
+        $ cd $GOPATH/src/github.com/openshift
         $ git clone git://github.com/openshift/origin
         $ cd origin
 
-3.  Bring up the VM:
+4.  Bring up the VM:
 
         $ vagrant up
 
-4.  SSH in:
+5.  SSH in:
 
         $ vagrant ssh
 
-5.  Run a build (ssh puts you into the correct origin directory):
+6.  Run a build (ssh puts you into the correct origin directory):
 
+        $ cd /data/src/github.com/openshift/origin
         $ hack/build-go.sh
 
-6.  Start an OpenShift all-in-one server (includes everything you need to try OpenShift)
+7.  Start an OpenShift all-in-one server (includes everything you need to try OpenShift)
 
-        $ openshift start
+        $ sudo systemctl start openshift
+
+8.  On your host system, try browsing to: https://localhost:8444
+
+TIP: See https://github.com/openshift/vagrant-openshift for more advanced options
 
 TIP: In some cases (eg. after git pull), you might run `make clean` in the `origin` directory to clean up outdated compiled files.
 
-== Development: What's on the Menu?
-Right now you can see what's happening with OpenShift development in two repositories:
+== Ensure virtual box interfaces are not managed by Network Manager
 
-1. The OpenShift Origin repo: https://github.com/openshift/origin[github.com/openshift/origin]
-2. The OpenShift Kubernetes fork: https://github.com/openshift/kubernetes[github.com/openshift/kubernetes]
+If you are developing on a Linux host, then you need to ensure that Network Manager is ignoring the
+virtual box interfaces, otherwise they cause issues with multi-vm networking.
+
+Follow these steps to ensure that virtual box interfaces are unmanaged:
+
+1. Check the status of Network Manager devices:
+
+	$ nmcli d
+
+2. If any devices whose name start with vboxnet* are not unmanaged, then they need to be added to
+   NetworkManager configuration to be ignored.
+
+	$ cat /etc/NetworkManager/NetworkManager.conf
+
+        [keyfile]
+        unmanaged-devices=mac:0a:00:27:00:00:00;mac:0a:00:27:00:00:01;mac:0a:00:27:00:00:02
+
+3. One can use the following command to help generate the configuration:
+
+	$ ip link list | grep vboxnet  -A 1 | grep link/ether | awk '{print "mac:" $2}' |  paste -sd ";" -
+
+== Development: What's on the Menu?
+Right now you can see what's happening with OpenShift development at:
+
+https://github.com/openshift/origin[github.com/openshift/origin]
 
 Here's a quick summary of what we're doing there:
 
@@ -100,27 +133,12 @@ From here, you can follow the https://github.com/openshift/origin/#getting-start
 
 Ready to play with some code? Hop down and read up on our link:#_the_roadmap[roadmap] for ideas on where you can contribute.
 
-=== The OpenShift Kubernetes Fork
-The OpenShift team is using this fork of the https://github.com/GoogleCloudPlatform/kubernetes[Kubernetes] project for two primary purposes:
-
-* As a staging area for pull requests to the upstream project
-* As a build area for Kubernetes that includes OpenShift-specific features that the upstream community does not want to add to the main project
-
 *If you are interested in contributing to Kubernetes directly:* +
 https://github.com/GoogleCloudPlatform/kubernetes#community-discussion-and-support[Join the Kubernetes community] and check out the https://github.com/GoogleCloudPlatform/kubernetes/blob/master/CONTRIBUTING.md[contributing guide].
 
-*If you are more interested in the OpenShift-specific use of Kubernetes:* +
-First, https://help.github.com/articles/fork-a-repo[fork our fork] of Kubernetes and make a local copy for yourself:
+=== Troubleshooting
 
-----
-$ go get github.com/openshift/kubernetes
-$ cd $GOPATH/src/github.com/openshift/kubernetes
-$ git remote add <YOUR_GITHUB_USERNAME> git@github.com:<YOUR_GITHUB_USERNAME>/kubernetes
-----
-
-From there, head to the https://github.com/openshift/kubernetes#development[Development section] of the README for general information on tinkering with Kubernetes.
-
-When you're ready to get your hands dirty, check out the roadmap info in the next section.
+If you run into difficulties running OpenShift, start by reading through the https://github.com/openshift/origin/blob/master/docs/debugging-openshift.md[troubleshooting guide].
 
 === The Roadmap
 The OpenShift project roadmap lives https://trello.com/b/nlLwlKoz/openshift-origin-roadmap[on Trello]. Of particular interest to those who want to get involved with the OpenShift 3 architecture are the following topics:

@@ -17,13 +17,16 @@ limitations under the License.
 package tools
 
 import (
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
+
 	"github.com/coreos/go-etcd/etcd"
 	"github.com/golang/glog"
 )
@@ -37,12 +40,28 @@ func Everything(runtime.Object) bool {
 	return true
 }
 
+// ParseWatchResourceVersion takes a resource version argument and converts it to
+// the etcd version we should pass to helper.Watch(). Because resourceVersion is
+// an opaque value, the default watch behavior for non-zero watch is to watch
+// the next value (if you pass "1", you will see updates from "2" onwards).
+func ParseWatchResourceVersion(resourceVersion, kind string) (uint64, error) {
+	if resourceVersion == "" || resourceVersion == "0" {
+		return 0, nil
+	}
+	version, err := strconv.ParseUint(resourceVersion, 10, 64)
+	if err != nil {
+		// TODO: Does this need to be a ValidationErrorList?  I can't convince myself it does.
+		return 0, errors.NewInvalid(kind, "", errors.ValidationErrorList{errors.NewFieldInvalid("resourceVersion", resourceVersion, err.Error())})
+	}
+	return version + 1, nil
+}
+
 // WatchList begins watching the specified key's items. Items are decoded into
 // API objects, and any items passing 'filter' are sent down the returned
 // watch.Interface. resourceVersion may be used to specify what version to begin
 // watching (e.g., for reconnecting without missing any updates).
 func (h *EtcdHelper) WatchList(key string, resourceVersion uint64, filter FilterFunc) (watch.Interface, error) {
-	w := newEtcdWatcher(true, filter, h.Codec, h.ResourceVersioner, nil)
+	w := newEtcdWatcher(true, exceptKey(key), filter, h.Codec, h.ResourceVersioner, nil)
 	go w.etcdWatch(h.Client, key, resourceVersion)
 	return w, nil
 }
@@ -71,7 +90,7 @@ func (h *EtcdHelper) Watch(key string, resourceVersion uint64) watch.Interface {
 //
 // Errors will be sent down the channel.
 func (h *EtcdHelper) WatchAndTransform(key string, resourceVersion uint64, transform TransformFunc) watch.Interface {
-	w := newEtcdWatcher(false, Everything, h.Codec, h.ResourceVersioner, transform)
+	w := newEtcdWatcher(false, nil, Everything, h.Codec, h.ResourceVersioner, transform)
 	go w.etcdWatch(h.Client, key, resourceVersion)
 	return w
 }
@@ -79,14 +98,25 @@ func (h *EtcdHelper) WatchAndTransform(key string, resourceVersion uint64, trans
 // TransformFunc attempts to convert an object to another object for use with a watcher.
 type TransformFunc func(runtime.Object) (runtime.Object, error)
 
+// includeFunc returns true if the given key should be considered part of a watch
+type includeFunc func(key string) bool
+
+// exceptKey is an includeFunc that returns false when the provided key matches the watched key
+func exceptKey(except string) includeFunc {
+	return func(key string) bool {
+		return key != except
+	}
+}
+
 // etcdWatcher converts a native etcd watch to a watch.Interface.
 type etcdWatcher struct {
 	encoding  runtime.Codec
-	versioner runtime.ResourceVersioner
+	versioner EtcdResourceVersioner
 	transform TransformFunc
 
-	list   bool // If we're doing a recursive watch, should be true.
-	filter FilterFunc
+	list    bool // If we're doing a recursive watch, should be true.
+	include includeFunc
+	filter  FilterFunc
 
 	etcdIncoming  chan *etcd.Response
 	etcdError     chan error
@@ -107,12 +137,13 @@ const watchWaitDuration = 100 * time.Millisecond
 
 // newEtcdWatcher returns a new etcdWatcher; if list is true, watch sub-nodes.  If you provide a transform
 // and a versioner, the versioner must be able to handle the objects that transform creates.
-func newEtcdWatcher(list bool, filter FilterFunc, encoding runtime.Codec, versioner runtime.ResourceVersioner, transform TransformFunc) *etcdWatcher {
+func newEtcdWatcher(list bool, include includeFunc, filter FilterFunc, encoding runtime.Codec, versioner EtcdResourceVersioner, transform TransformFunc) *etcdWatcher {
 	w := &etcdWatcher{
 		encoding:     encoding,
 		versioner:    versioner,
 		transform:    transform,
 		list:         list,
+		include:      include,
 		filter:       filter,
 		etcdIncoming: make(chan *etcd.Response),
 		etcdError:    make(chan error, 1),
@@ -149,7 +180,7 @@ func etcdGetInitialWatchState(client EtcdGetSet, key string, recursive bool, inc
 	resp, err := client.Get(key, false, recursive)
 	if err != nil {
 		if !IsEtcdNotFound(err) {
-			glog.Errorf("watch was unable to retrieve the current index for the provided key: %v (%#v)", err, key)
+			glog.Errorf("watch was unable to retrieve the current index for the provided key (%q): %v", key, err)
 			return resourceVersion, err
 		}
 		if index, ok := etcdErrorIndex(err); ok {
@@ -239,6 +270,9 @@ func (w *etcdWatcher) sendAdd(res *etcd.Response) {
 		glog.Errorf("unexpected nil node: %#v", res)
 		return
 	}
+	if w.include != nil && !w.include(res.Node.Key) {
+		return
+	}
 	data := []byte(res.Node.Value)
 	obj, err := w.decodeObject(data, res.Node.ModifiedIndex)
 	if err != nil {
@@ -264,6 +298,9 @@ func (w *etcdWatcher) sendAdd(res *etcd.Response) {
 func (w *etcdWatcher) sendModify(res *etcd.Response) {
 	if res.Node == nil {
 		glog.Errorf("unexpected nil node: %#v", res)
+		return
+	}
+	if w.include != nil && !w.include(res.Node.Key) {
 		return
 	}
 	curData := []byte(res.Node.Value)
@@ -310,6 +347,9 @@ func (w *etcdWatcher) sendModify(res *etcd.Response) {
 func (w *etcdWatcher) sendDelete(res *etcd.Response) {
 	if res.PrevNode == nil {
 		glog.Errorf("unexpected nil prev node: %#v", res)
+		return
+	}
+	if w.include != nil && !w.include(res.PrevNode.Key) {
 		return
 	}
 	data := []byte(res.PrevNode.Value)

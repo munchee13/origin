@@ -18,43 +18,31 @@ package util
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 
-	"gopkg.in/v1/yaml"
+	"github.com/ghodss/yaml"
 )
 
-type FakeJSONBase struct {
-	ID string
-}
-type FakePod struct {
-	FakeJSONBase `json:",inline" yaml:",inline"`
-	Labels       map[string]string
-	Int          int
-	Str          string
-}
+func TestUntil(t *testing.T) {
+	ch := make(chan struct{})
+	close(ch)
+	Until(func() {
+		t.Fatal("should not have been invoked")
+	}, 0, ch)
 
-func TestEncodeJSON(t *testing.T) {
-	pod := FakePod{
-		FakeJSONBase: FakeJSONBase{ID: "foo"},
-		Labels: map[string]string{
-			"foo": "bar",
-			"baz": "blah",
-		},
-		Int: -6,
-		Str: "a string",
-	}
-
-	body := EncodeJSON(pod)
-
-	expectedBody, err := json.Marshal(pod)
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-
-	if string(expectedBody) != body {
-		t.Errorf("JSON doesn't match.  Expected %s, saw %s", expectedBody, body)
-	}
+	ch = make(chan struct{})
+	called := make(chan struct{})
+	go func() {
+		Until(func() {
+			called <- struct{}{}
+		}, 0, ch)
+		close(called)
+	}()
+	<-called
+	close(ch)
+	<-called
 }
 
 func TestHandleCrash(t *testing.T) {
@@ -69,6 +57,40 @@ func TestHandleCrash(t *testing.T) {
 	}
 	if count != expect {
 		t.Errorf("Expected %d iterations, found %d", expect, count)
+	}
+}
+
+func TestCustomHandleCrash(t *testing.T) {
+	old := PanicHandlers
+	defer func() { PanicHandlers = old }()
+	var result interface{}
+	PanicHandlers = []func(interface{}){
+		func(r interface{}) {
+			result = r
+		},
+	}
+	func() {
+		defer HandleCrash()
+		panic("test")
+	}()
+	if result != "test" {
+		t.Errorf("did not receive custom handler")
+	}
+}
+
+func TestCustomHandleError(t *testing.T) {
+	old := ErrorHandlers
+	defer func() { ErrorHandlers = old }()
+	var result error
+	ErrorHandlers = []func(error){
+		func(err error) {
+			result = err
+		},
+	}
+	err := fmt.Errorf("test")
+	HandleError(err)
+	if result != err {
+		t.Errorf("did not receive custom handler")
 	}
 }
 
@@ -87,7 +109,7 @@ func TestNewIntOrStringFromString(t *testing.T) {
 }
 
 type IntOrStringHolder struct {
-	IOrS IntOrString `json:"val" yaml:"val"`
+	IOrS IntOrString `json:"val"`
 }
 
 func TestIntOrStringUnmarshalYAML(t *testing.T) {
@@ -204,5 +226,109 @@ func TestStringDiff(t *testing.T) {
 	expect := "aaa\n\nA: bb\n\nB: cc\n\n"
 	if diff != expect {
 		t.Errorf("diff returned %v", diff)
+	}
+}
+
+func TestCompileRegex(t *testing.T) {
+	uncompiledRegexes := []string{"endsWithMe$", "^startingWithMe"}
+	regexes, err := CompileRegexps(uncompiledRegexes)
+
+	if err != nil {
+		t.Errorf("Failed to compile legal regexes: '%v': %v", uncompiledRegexes, err)
+	}
+	if len(regexes) != len(uncompiledRegexes) {
+		t.Errorf("Wrong number of regexes returned: '%v': %v", uncompiledRegexes, regexes)
+	}
+
+	if !regexes[0].MatchString("Something that endsWithMe") {
+		t.Errorf("Wrong regex returned: '%v': %v", uncompiledRegexes[0], regexes[0])
+	}
+	if regexes[0].MatchString("Something that doesn't endsWithMe.") {
+		t.Errorf("Wrong regex returned: '%v': %v", uncompiledRegexes[0], regexes[0])
+	}
+	if !regexes[1].MatchString("startingWithMe is very important") {
+		t.Errorf("Wrong regex returned: '%v': %v", uncompiledRegexes[1], regexes[1])
+	}
+	if regexes[1].MatchString("not startingWithMe should fail") {
+		t.Errorf("Wrong regex returned: '%v': %v", uncompiledRegexes[1], regexes[1])
+	}
+}
+
+func TestAllPtrFieldsNil(t *testing.T) {
+	testCases := []struct {
+		obj      interface{}
+		expected bool
+	}{
+		{struct{}{}, true},
+		{struct{ Foo int }{12345}, true},
+		{&struct{ Foo int }{12345}, true},
+		{struct{ Foo *int }{nil}, true},
+		{&struct{ Foo *int }{nil}, true},
+		{struct {
+			Foo int
+			Bar *int
+		}{12345, nil}, true},
+		{&struct {
+			Foo int
+			Bar *int
+		}{12345, nil}, true},
+		{struct {
+			Foo *int
+			Bar *int
+		}{nil, nil}, true},
+		{&struct {
+			Foo *int
+			Bar *int
+		}{nil, nil}, true},
+		{struct{ Foo *int }{new(int)}, false},
+		{&struct{ Foo *int }{new(int)}, false},
+		{struct {
+			Foo *int
+			Bar *int
+		}{nil, new(int)}, false},
+		{&struct {
+			Foo *int
+			Bar *int
+		}{nil, new(int)}, false},
+		{(*struct{})(nil), true},
+	}
+	for i, tc := range testCases {
+		if AllPtrFieldsNil(tc.obj) != tc.expected {
+			t.Errorf("case[%d]: expected %t, got %t", i, tc.expected, !tc.expected)
+		}
+	}
+}
+
+func TestSplitQualifiedName(t *testing.T) {
+	testCases := []struct {
+		input  string
+		output []string
+	}{
+		{"kubernetes.io/blah", []string{"kubernetes.io", "blah"}},
+		{"blah", []string{"", "blah"}},
+		{"kubernetes.io/blah/blah", []string{"kubernetes.io", "blah"}},
+	}
+	for i, tc := range testCases {
+		namespace, name := SplitQualifiedName(tc.input)
+		if namespace != tc.output[0] || name != tc.output[1] {
+			t.Errorf("case[%d]: expected (%q, %q), got (%q, %q)", i, tc.output[0], tc.output[1], namespace, name)
+		}
+	}
+}
+
+func TestJoinQualifiedName(t *testing.T) {
+	testCases := []struct {
+		input  []string
+		output string
+	}{
+		{[]string{"kubernetes.io", "blah"}, "kubernetes.io/blah"},
+		{[]string{"blah", ""}, "blah"},
+		{[]string{"kubernetes.io", "blah"}, "kubernetes.io/blah"},
+	}
+	for i, tc := range testCases {
+		res := JoinQualifiedName(tc.input[0], tc.input[1])
+		if res != tc.output {
+			t.Errorf("case[%d]: expected %q, got %q", i, tc.output, res)
+		}
 	}
 }

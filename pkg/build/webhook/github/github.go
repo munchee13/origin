@@ -8,19 +8,43 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/golang/glog"
 	"github.com/openshift/origin/pkg/build/api"
+	"github.com/openshift/origin/pkg/build/webhook"
 )
 
-// GitHubWebHook used for processing github webhook requests.
-type GitHubWebHook struct{}
+// WebHook used for processing github webhook requests.
+type WebHook struct{}
 
 // New returns github webhook plugin.
-func New() *GitHubWebHook {
-	return &GitHubWebHook{}
+func New() *WebHook {
+	return &WebHook{}
 }
 
-// Extract responsible for servicing webhooks from github.com.
-func (p *GitHubWebHook) Extract(buildCfg *api.BuildConfig, path string, req *http.Request) (build *api.Build, proceed bool, err error) {
+type commit struct {
+	ID        string                `json:"id,omitempty"`
+	Author    api.SourceControlUser `json:"author,omitempty"`
+	Committer api.SourceControlUser `json:"committer,omitempty"`
+	Message   string                `json:"message,omitempty"`
+}
+
+type pushEvent struct {
+	Ref        string `json:"ref,omitempty"`
+	After      string `json:"after,omitempty"`
+	HeadCommit commit `json:"head_commit,omitempty"`
+}
+
+// Extract services webhooks from github.com
+func (p *WebHook) Extract(buildCfg *api.BuildConfig, secret, path string, req *http.Request) (revision *api.SourceRevision, proceed bool, err error) {
+	trigger, ok := webhook.FindTriggerPolicy(api.GithubWebHookBuildTriggerType, buildCfg)
+	if !ok {
+		err = fmt.Errorf("BuildConfig %s does not support the Github webhook trigger type", buildCfg.Name)
+		return
+	}
+	if trigger.GithubWebHook.Secret != secret {
+		err = fmt.Errorf("Secret does not match for BuildConfig %s", buildCfg.Name)
+		return
+	}
 	if err = verifyRequest(req); err != nil {
 		return
 	}
@@ -29,14 +53,31 @@ func (p *GitHubWebHook) Extract(buildCfg *api.BuildConfig, path string, req *htt
 		err = fmt.Errorf("Unknown X-GitHub-Event %s", method)
 		return
 	}
-	proceed = (method == "push")
+	if method == "ping" {
+		proceed = false
+		return
+	}
 	body, err := ioutil.ReadAll(req.Body)
 	if err != nil {
 		return
 	}
-	var data map[string]interface{}
-	if err = json.Unmarshal(body, &data); err != nil {
+	var event pushEvent
+	if err = json.Unmarshal(body, &event); err != nil {
 		return
+	}
+	proceed = webhook.GitRefMatches(event.Ref, buildCfg.Parameters.Source.Git.Ref)
+	if !proceed {
+		glog.V(2).Infof("Skipping build for '%s'.  Branch reference from '%s' does not match configuration", buildCfg, event)
+	}
+
+	revision = &api.SourceRevision{
+		Type: api.BuildSourceGit,
+		Git: &api.GitSourceRevision{
+			Commit:    event.HeadCommit.ID,
+			Author:    event.HeadCommit.Author,
+			Committer: event.HeadCommit.Committer,
+			Message:   event.HeadCommit.Message,
+		},
 	}
 
 	return
@@ -50,7 +91,7 @@ func verifyRequest(req *http.Request) error {
 		return fmt.Errorf("Unsupported Content-Type %s", contentType)
 	}
 	if userAgent := req.Header.Get("User-Agent"); !strings.HasPrefix(userAgent, "GitHub-Hookshot/") {
-		return fmt.Errorf("Unsupported User-Agent %s")
+		return fmt.Errorf("Unsupported User-Agent %s", userAgent)
 	}
 	if req.Header.Get("X-GitHub-Event") == "" {
 		return errors.New("Missing X-GitHub-Event")

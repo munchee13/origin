@@ -18,82 +18,64 @@ package pod
 
 import (
 	"fmt"
-	"sync"
-	"time"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/rest"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/v1beta1"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
-
-	"code.google.com/p/go-uuid/uuid"
-	"github.com/golang/glog"
 )
+
+type PodStatusGetter interface {
+	GetPodStatus(namespace, name string) (*api.PodStatus, error)
+	ClearPodStatus(namespace, name string)
+}
 
 // REST implements the RESTStorage interface in terms of a PodRegistry.
 type REST struct {
-	cloudProvider cloudprovider.Interface
-	mu            sync.Mutex
-	podCache      client.PodInfoGetter
-	podInfoGetter client.PodInfoGetter
-	podPollPeriod time.Duration
-	registry      Registry
-	minions       client.MinionInterface
+	podCache PodStatusGetter
+	registry Registry
 }
 
 type RESTConfig struct {
-	CloudProvider cloudprovider.Interface
-	PodCache      client.PodInfoGetter
-	PodInfoGetter client.PodInfoGetter
-	Registry      Registry
-	Minions       client.MinionInterface
+	PodCache PodStatusGetter
+	Registry Registry
 }
 
 // NewREST returns a new REST.
 func NewREST(config *RESTConfig) *REST {
 	return &REST{
-		cloudProvider: config.CloudProvider,
-		podCache:      config.PodCache,
-		podInfoGetter: config.PodInfoGetter,
-		podPollPeriod: time.Second * 10,
-		registry:      config.Registry,
-		minions:       config.Minions,
+		podCache: config.PodCache,
+		registry: config.Registry,
 	}
 }
 
-func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error) {
+func (rs *REST) Create(ctx api.Context, obj runtime.Object) (runtime.Object, error) {
 	pod := obj.(*api.Pod)
-	if !api.ValidNamespace(ctx, &pod.JSONBase) {
-		return nil, errors.NewConflict("pod", pod.Namespace, fmt.Errorf("Pod.Namespace does not match the provided context"))
-	}
-	pod.DesiredState.Manifest.UUID = uuid.NewUUID().String()
-	if len(pod.ID) == 0 {
-		pod.ID = pod.DesiredState.Manifest.UUID
-	}
-	pod.DesiredState.Manifest.ID = pod.ID
-	if errs := validation.ValidatePod(pod); len(errs) > 0 {
-		return nil, errors.NewInvalid("pod", pod.ID, errs)
-	}
-	pod.CreationTimestamp = util.Now()
 
-	return apiserver.MakeAsync(func() (runtime.Object, error) {
-		if err := rs.registry.CreatePod(ctx, pod); err != nil {
-			return nil, err
-		}
-		return rs.registry.GetPod(ctx, pod.ID)
-	}), nil
+	if err := rest.BeforeCreate(rest.Pods, ctx, obj); err != nil {
+		return nil, err
+	}
+
+	if err := rs.registry.CreatePod(ctx, pod); err != nil {
+		err = rest.CheckGeneratedNameError(rest.Pods, err, pod)
+		return nil, err
+	}
+	return rs.registry.GetPod(ctx, pod.Name)
 }
 
-func (rs *REST) Delete(ctx api.Context, id string) (<-chan runtime.Object, error) {
-	return apiserver.MakeAsync(func() (runtime.Object, error) {
-		return &api.Status{Status: api.StatusSuccess}, rs.registry.DeletePod(ctx, id)
-	}), nil
+func (rs *REST) Delete(ctx api.Context, id string) (runtime.Object, error) {
+	namespace, found := api.NamespaceFrom(ctx)
+	if !found {
+		return &api.Status{Status: api.StatusFailure}, nil
+	}
+	rs.podCache.ClearPodStatus(namespace, id)
+
+	return &api.Status{Status: api.StatusSuccess}, rs.registry.DeletePod(ctx, id)
 }
 
 func (rs *REST) Get(ctx api.Context, id string) (runtime.Object, error) {
@@ -104,23 +86,34 @@ func (rs *REST) Get(ctx api.Context, id string) (runtime.Object, error) {
 	if pod == nil {
 		return pod, nil
 	}
-	if rs.podCache != nil || rs.podInfoGetter != nil {
-		rs.fillPodInfo(pod)
-		status, err := getPodStatus(pod, rs.minions)
-		if err != nil {
-			return pod, err
+	host := pod.Status.Host
+	if status, err := rs.podCache.GetPodStatus(pod.Namespace, pod.Name); err != nil {
+		pod.Status = api.PodStatus{
+			Phase: api.PodUnknown,
 		}
-		pod.CurrentState.Status = status
+	} else {
+		pod.Status = *status
 	}
-	pod.CurrentState.HostIP = getInstanceIP(rs.cloudProvider, pod.CurrentState.Host)
+	// Make sure not to hide a recent host with an old one from the cache.
+	// TODO: move host to spec
+	pod.Status.Host = host
 	return pod, err
 }
 
-func (rs *REST) podToSelectableFields(pod *api.Pod) labels.Set {
+func PodToSelectableFields(pod *api.Pod) labels.Set {
+
+	// TODO we are populating both Status and DesiredState because selectors are not aware of API versions
+	// see https://github.com/GoogleCloudPlatform/kubernetes/pull/2503
+
+	var olderPodStatus v1beta1.PodStatus
+	api.Scheme.Convert(pod.Status.Phase, &olderPodStatus)
+
 	return labels.Set{
-		"ID": pod.ID,
-		"DesiredState.Status": string(pod.DesiredState.Status),
-		"DesiredState.Host":   pod.DesiredState.Host,
+		"name":                pod.Name,
+		"Status.Phase":        string(pod.Status.Phase),
+		"Status.Host":         pod.Status.Host,
+		"DesiredState.Status": string(olderPodStatus),
+		"DesiredState.Host":   pod.Status.Host,
 	}
 }
 
@@ -128,7 +121,7 @@ func (rs *REST) podToSelectableFields(pod *api.Pod) labels.Set {
 // ListPods & WatchPods.
 func (rs *REST) filterFunc(label, field labels.Selector) func(*api.Pod) bool {
 	return func(pod *api.Pod) bool {
-		fields := rs.podToSelectableFields(pod)
+		fields := PodToSelectableFields(pod)
 		return label.Matches(labels.Set(pod.Labels)) && field.Matches(fields)
 	}
 }
@@ -138,167 +131,91 @@ func (rs *REST) List(ctx api.Context, label, field labels.Selector) (runtime.Obj
 	if err == nil {
 		for i := range pods.Items {
 			pod := &pods.Items[i]
-			rs.fillPodInfo(pod)
-			status, err := getPodStatus(pod, rs.minions)
-			if err != nil {
-				return pod, err
+			host := pod.Status.Host
+			if status, err := rs.podCache.GetPodStatus(pod.Namespace, pod.Name); err != nil {
+				pod.Status = api.PodStatus{
+					Phase: api.PodUnknown,
+				}
+			} else {
+				pod.Status = *status
 			}
-			pod.CurrentState.Status = status
-			pod.CurrentState.HostIP = getInstanceIP(rs.cloudProvider, pod.CurrentState.Host)
+			// Make sure not to hide a recent host with an old one from the cache.
+			// This is tested by the integration test.
+			// TODO: move host to spec
+			pod.Status.Host = host
 		}
 	}
 	return pods, err
 }
 
 // Watch begins watching for new, changed, or deleted pods.
-func (rs *REST) Watch(ctx api.Context, label, field labels.Selector, resourceVersion uint64) (watch.Interface, error) {
-	return rs.registry.WatchPods(ctx, resourceVersion, rs.filterFunc(label, field))
+func (rs *REST) Watch(ctx api.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error) {
+	// TODO: Add pod status to watch command
+	return rs.registry.WatchPods(ctx, label, field, resourceVersion)
 }
 
 func (*REST) New() runtime.Object {
 	return &api.Pod{}
 }
 
-func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error) {
+func (*REST) NewList() runtime.Object {
+	return &api.PodList{}
+}
+
+func (rs *REST) Update(ctx api.Context, obj runtime.Object) (runtime.Object, bool, error) {
 	pod := obj.(*api.Pod)
-	if !api.ValidNamespace(ctx, &pod.JSONBase) {
-		return nil, errors.NewConflict("pod", pod.Namespace, fmt.Errorf("Pod.Namespace does not match the provided context"))
+	if !api.ValidNamespace(ctx, &pod.ObjectMeta) {
+		return nil, false, errors.NewConflict("pod", pod.Namespace, fmt.Errorf("Pod.Namespace does not match the provided context"))
 	}
 	if errs := validation.ValidatePod(pod); len(errs) > 0 {
-		return nil, errors.NewInvalid("pod", pod.ID, errs)
+		return nil, false, errors.NewInvalid("pod", pod.Name, errs)
 	}
-	return apiserver.MakeAsync(func() (runtime.Object, error) {
-		if err := rs.registry.UpdatePod(ctx, pod); err != nil {
-			return nil, err
-		}
-		return rs.registry.GetPod(ctx, pod.ID)
-	}), nil
+	if err := rs.registry.UpdatePod(ctx, pod); err != nil {
+		return nil, false, err
+	}
+	out, err := rs.registry.GetPod(ctx, pod.Name)
+	return out, false, err
 }
 
-func (rs *REST) fillPodInfo(pod *api.Pod) {
-	pod.CurrentState.Host = pod.DesiredState.Host
-	if pod.CurrentState.Host == "" {
-		return
+// ResourceLocation returns a URL to which one can send traffic for the specified pod.
+func (rs *REST) ResourceLocation(ctx api.Context, id string) (string, error) {
+	// Allow ID as "podname" or "podname:port".  If port is not specified,
+	// try to use the first defined port on the pod.
+	parts := strings.Split(id, ":")
+	if len(parts) > 2 {
+		return "", errors.NewBadRequest(fmt.Sprintf("invalid pod request %q", id))
 	}
-	// Get cached info for the list currently.
-	// TODO: Optionally use fresh info
-	if rs.podCache != nil {
-		info, err := rs.podCache.GetPodInfo(pod.CurrentState.Host, pod.ID)
-		if err != nil {
-			if err != client.ErrPodInfoNotAvailable {
-				glog.Errorf("Error getting container info from cache: %#v", err)
-			}
-			if rs.podInfoGetter != nil {
-				info, err = rs.podInfoGetter.GetPodInfo(pod.CurrentState.Host, pod.ID)
-			}
-			if err != nil {
-				if err != client.ErrPodInfoNotAvailable {
-					glog.Errorf("Error getting fresh container info: %#v", err)
-				}
-				return
-			}
-		}
-		pod.CurrentState.Info = info
-		netContainerInfo, ok := info["net"]
-		if ok {
-			if netContainerInfo.DetailInfo.NetworkSettings != nil {
-				pod.CurrentState.PodIP = netContainerInfo.DetailInfo.NetworkSettings.IPAddress
-			} else {
-				glog.Warningf("No network settings: %#v", netContainerInfo)
-			}
-		} else {
-			glog.Warningf("Couldn't find network container for %s in %v", pod.ID, info)
-		}
+	name := parts[0]
+	port := ""
+	if len(parts) == 2 {
+		// TODO: if port is not a number but a "(container)/(portname)", do a name lookup.
+		port = parts[1]
 	}
-}
 
-func getInstanceIP(cloud cloudprovider.Interface, host string) string {
-	if cloud == nil {
-		return ""
-	}
-	instances, ok := cloud.Instances()
-	if instances == nil || !ok {
-		return ""
-	}
-	addr, err := instances.IPAddress(host)
+	obj, err := rs.Get(ctx, name)
 	if err != nil {
-		glog.Errorf("Error getting instance IP: %#v", err)
-		return ""
+		return "", err
 	}
-	return addr.String()
-}
+	pod := obj.(*api.Pod)
+	if pod == nil {
+		return "", nil
+	}
 
-func getPodStatus(pod *api.Pod, minions client.MinionInterface) (api.PodStatus, error) {
-	if pod.CurrentState.Host == "" {
-		return api.PodWaiting, nil
-	}
-	if minions != nil {
-		res, err := minions.ListMinions()
-		if err != nil {
-			glog.Errorf("Error listing minions: %v", err)
-			return "", err
-		}
-		found := false
-		for _, minion := range res.Items {
-			if minion.ID == pod.CurrentState.Host {
-				found = true
+	// Try to figure out a port.
+	if port == "" {
+		for i := range pod.Spec.Containers {
+			if len(pod.Spec.Containers[i].Ports) > 0 {
+				port = fmt.Sprintf("%d", pod.Spec.Containers[i].Ports[0].ContainerPort)
 				break
 			}
 		}
-		if !found {
-			return api.PodTerminated, nil
-		}
-	} else {
-		glog.Errorf("Unexpected missing minion interface, status may be in-accurate")
 	}
-	if pod.CurrentState.Info == nil {
-		return api.PodWaiting, nil
-	}
-	running := 0
-	stopped := 0
-	unknown := 0
-	for _, container := range pod.DesiredState.Manifest.Containers {
-		if containerStatus, ok := pod.CurrentState.Info[container.Name]; ok {
-			if containerStatus.State.Running != nil {
-				running++
-			} else if containerStatus.State.Termination != nil {
-				stopped++
-			} else {
-				unknown++
-			}
-		} else {
-			unknown++
-		}
-	}
-	switch {
-	case running > 0 && stopped == 0 && unknown == 0:
-		return api.PodRunning, nil
-	case running == 0 && stopped > 0 && unknown == 0:
-		return api.PodTerminated, nil
-	case running == 0 && stopped == 0 && unknown > 0:
-		return api.PodWaiting, nil
-	default:
-		return api.PodWaiting, nil
-	}
-}
 
-func (rs *REST) waitForPodRunning(ctx api.Context, pod *api.Pod) (runtime.Object, error) {
-	for {
-		podObj, err := rs.Get(ctx, pod.ID)
-		if err != nil || podObj == nil {
-			return nil, err
-		}
-		podPtr, ok := podObj.(*api.Pod)
-		if !ok {
-			// This should really never happen.
-			return nil, fmt.Errorf("Error %#v is not an api.Pod!", podObj)
-		}
-		switch podPtr.CurrentState.Status {
-		case api.PodRunning, api.PodTerminated:
-			return pod, nil
-		default:
-			time.Sleep(rs.podPollPeriod)
-		}
+	// We leave off the scheme ('http://') because we have no idea what sort of server
+	// is listening at this endpoint.
+	loc := pod.Status.PodIP
+	if port != "" {
+		loc += fmt.Sprintf(":%s", port)
 	}
-	return pod, nil
+	return loc, nil
 }

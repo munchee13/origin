@@ -1,11 +1,25 @@
 package etcd
 
 import (
+	"github.com/golang/glog"
+
 	etcderr "github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors/etcd"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
+	ktools "github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	kubeetcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/etcd"
 	"github.com/openshift/origin/pkg/build/api"
+)
+
+const (
+	// BuildPath is the path to build resources in etcd
+	BuildPath string = "/builds"
+	// BuildConfigPath is the path to buildConfig resources in etcd
+	BuildConfigPath string = "/buildConfigs"
 )
 
 // Etcd implements build.Registry and buildconfig.Registry backed by etcd.
@@ -20,14 +34,18 @@ func New(helper tools.EtcdHelper) *Etcd {
 	}
 }
 
-func makeBuildKey(id string) string {
-	return "/registry/builds/" + id
+func makeBuildListKey(ctx kapi.Context) string {
+	return kubeetcd.MakeEtcdListKey(ctx, BuildPath)
+}
+
+func makeBuildKey(ctx kapi.Context, id string) (string, error) {
+	return kubeetcd.MakeEtcdItemKey(ctx, BuildPath, id)
 }
 
 // ListBuilds obtains a list of Builds.
-func (r *Etcd) ListBuilds(selector labels.Selector) (*api.BuildList, error) {
+func (r *Etcd) ListBuilds(ctx kapi.Context, selector labels.Selector) (*api.BuildList, error) {
 	allBuilds := api.BuildList{}
-	err := r.ExtractList("/registry/builds", &allBuilds.Items, &allBuilds.ResourceVersion)
+	err := r.ExtractToList(makeBuildListKey(ctx), &allBuilds)
 	if err != nil {
 		return nil, err
 	}
@@ -41,10 +59,36 @@ func (r *Etcd) ListBuilds(selector labels.Selector) (*api.BuildList, error) {
 	return &allBuilds, nil
 }
 
+// WatchBuilds begins watching for new, changed, or deleted Builds.
+func (r *Etcd) WatchBuilds(ctx kapi.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error) {
+	version, err := ktools.ParseWatchResourceVersion(resourceVersion, "build")
+	if err != nil {
+		return nil, err
+	}
+
+	return r.WatchList(makeBuildListKey(ctx), version, func(obj runtime.Object) bool {
+		build, ok := obj.(*api.Build)
+		if !ok {
+			glog.Errorf("Unexpected object during build watch: %#v", obj)
+			return false
+		}
+		fields := labels.Set{
+			"name":    build.Name,
+			"status":  string(build.Status),
+			"podName": build.PodName,
+		}
+		return label.Matches(labels.Set(build.Labels)) && field.Matches(fields)
+	})
+}
+
 // GetBuild gets a specific Build specified by its ID.
-func (r *Etcd) GetBuild(id string) (*api.Build, error) {
+func (r *Etcd) GetBuild(ctx kapi.Context, id string) (*api.Build, error) {
 	var build api.Build
-	err := r.ExtractObj(makeBuildKey(id), &build, false)
+	key, err := makeBuildKey(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	err = r.ExtractObj(key, &build, false)
 	if err != nil {
 		return nil, etcderr.InterpretGetError(err, "build", id)
 	}
@@ -52,32 +96,47 @@ func (r *Etcd) GetBuild(id string) (*api.Build, error) {
 }
 
 // CreateBuild creates a new Build.
-func (r *Etcd) CreateBuild(build *api.Build) error {
-	err := r.CreateObj(makeBuildKey(build.ID), build, 0)
-	return etcderr.InterpretCreateError(err, "build", build.ID)
+func (r *Etcd) CreateBuild(ctx kapi.Context, build *api.Build) error {
+	key, err := makeBuildKey(ctx, build.Name)
+	if err != nil {
+		return err
+	}
+	err = r.CreateObj(key, build, 0)
+	return etcderr.InterpretCreateError(err, "build", build.Name)
 }
 
 // UpdateBuild replaces an existing Build.
-func (r *Etcd) UpdateBuild(build *api.Build) error {
-	err := r.SetObj(makeBuildKey(build.ID), build)
-	return etcderr.InterpretUpdateError(err, "build", build.ID)
+func (r *Etcd) UpdateBuild(ctx kapi.Context, build *api.Build) error {
+	key, err := makeBuildKey(ctx, build.Name)
+	if err != nil {
+		return err
+	}
+	err = r.SetObj(key, build, 0)
+	return etcderr.InterpretUpdateError(err, "build", build.Name)
 }
 
 // DeleteBuild deletes a Build specified by its ID.
-func (r *Etcd) DeleteBuild(id string) error {
-	key := makeBuildKey(id)
-	err := r.Delete(key, true)
+func (r *Etcd) DeleteBuild(ctx kapi.Context, id string) error {
+	key, err := makeBuildKey(ctx, id)
+	if err != nil {
+		return err
+	}
+	err = r.Delete(key, true)
 	return etcderr.InterpretDeleteError(err, "build", id)
 }
 
-func makeBuildConfigKey(id string) string {
-	return "/registry/build-configs/" + id
+func makeBuildConfigListKey(ctx kapi.Context) string {
+	return kubeetcd.MakeEtcdListKey(ctx, BuildConfigPath)
+}
+
+func makeBuildConfigKey(ctx kapi.Context, id string) (string, error) {
+	return kubeetcd.MakeEtcdItemKey(ctx, BuildConfigPath, id)
 }
 
 // ListBuildConfigs obtains a list of BuildConfigs.
-func (r *Etcd) ListBuildConfigs(selector labels.Selector) (*api.BuildConfigList, error) {
+func (r *Etcd) ListBuildConfigs(ctx kapi.Context, selector labels.Selector) (*api.BuildConfigList, error) {
 	allConfigs := api.BuildConfigList{}
-	err := r.ExtractList("/registry/build-configs", &allConfigs.Items, &allConfigs.ResourceVersion)
+	err := r.ExtractToList(makeBuildConfigListKey(ctx), &allConfigs)
 	if err != nil {
 		return nil, err
 	}
@@ -92,9 +151,13 @@ func (r *Etcd) ListBuildConfigs(selector labels.Selector) (*api.BuildConfigList,
 }
 
 // GetBuildConfig gets a specific BuildConfig specified by its ID.
-func (r *Etcd) GetBuildConfig(id string) (*api.BuildConfig, error) {
+func (r *Etcd) GetBuildConfig(ctx kapi.Context, id string) (*api.BuildConfig, error) {
 	var config api.BuildConfig
-	err := r.ExtractObj(makeBuildConfigKey(id), &config, false)
+	key, err := makeBuildConfigKey(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	err = r.ExtractObj(key, &config, false)
 	if err != nil {
 		return nil, etcderr.InterpretGetError(err, "buildConfig", id)
 	}
@@ -102,20 +165,51 @@ func (r *Etcd) GetBuildConfig(id string) (*api.BuildConfig, error) {
 }
 
 // CreateBuildConfig creates a new BuildConfig.
-func (r *Etcd) CreateBuildConfig(config *api.BuildConfig) error {
-	err := r.CreateObj(makeBuildConfigKey(config.ID), config, 0)
-	return etcderr.InterpretCreateError(err, "buildConfig", config.ID)
+func (r *Etcd) CreateBuildConfig(ctx kapi.Context, config *api.BuildConfig) error {
+	key, err := makeBuildConfigKey(ctx, config.Name)
+	if err != nil {
+		return err
+	}
+	err = r.CreateObj(key, config, 0)
+	return etcderr.InterpretCreateError(err, "buildConfig", config.Name)
 }
 
 // UpdateBuildConfig replaces an existing BuildConfig.
-func (r *Etcd) UpdateBuildConfig(config *api.BuildConfig) error {
-	err := r.SetObj(makeBuildConfigKey(config.ID), config)
-	return etcderr.InterpretUpdateError(err, "buildConfig", config.ID)
+func (r *Etcd) UpdateBuildConfig(ctx kapi.Context, config *api.BuildConfig) error {
+	key, err := makeBuildConfigKey(ctx, config.Name)
+	if err != nil {
+		return err
+	}
+	err = r.SetObj(key, config, 0)
+	return etcderr.InterpretUpdateError(err, "buildConfig", config.Name)
 }
 
 // DeleteBuildConfig deletes a BuildConfig specified by its ID.
-func (r *Etcd) DeleteBuildConfig(id string) error {
-	key := makeBuildConfigKey(id)
-	err := r.Delete(key, true)
+func (r *Etcd) DeleteBuildConfig(ctx kapi.Context, id string) error {
+	key, err := makeBuildConfigKey(ctx, id)
+	if err != nil {
+		return err
+	}
+	err = r.Delete(key, true)
 	return etcderr.InterpretDeleteError(err, "buildConfig", id)
+}
+
+// WatchBuildConfigs begins watching for new, changed, or deleted BuildConfigs.
+func (r *Etcd) WatchBuildConfigs(ctx kapi.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error) {
+	version, err := ktools.ParseWatchResourceVersion(resourceVersion, "buildConfig")
+	if err != nil {
+		return nil, err
+	}
+
+	return r.WatchList(makeBuildConfigListKey(ctx), version, func(obj runtime.Object) bool {
+		buildConfig, ok := obj.(*api.BuildConfig)
+		if !ok {
+			glog.Errorf("Unexpected object during buildConfig watch: %#v", obj)
+			return false
+		}
+		fields := labels.Set{
+			"name": buildConfig.Name,
+		}
+		return label.Matches(labels.Set(buildConfig.Labels)) && field.Matches(fields)
+	})
 }

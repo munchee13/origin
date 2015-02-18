@@ -51,7 +51,7 @@ import (
 //
 func (s *Scheme) EncodeToVersion(obj interface{}, destVersion string) (data []byte, err error) {
 	obj = maybeCopy(obj)
-	v, _ := enforcePtr(obj) // maybeCopy guarantees a pointer
+	v, _ := EnforcePtr(obj) // maybeCopy guarantees a pointer
 	if _, registered := s.typeToVersion[v.Type()]; !registered {
 		return nil, fmt.Errorf("type %v is not registered and it will be impossible to Decode it, therefore Encode will refuse to encode it.", v.Type())
 	}
@@ -72,6 +72,12 @@ func (s *Scheme) EncodeToVersion(obj interface{}, destVersion string) (data []by
 			return nil, err
 		}
 		obj = objOut
+	}
+
+	// ensure the output object name comes from the destination type
+	_, objKind, err = s.ObjectVersionAndKind(obj)
+	if err != nil {
+		return nil, err
 	}
 
 	// Version and Kind should be set on the wire.

@@ -4,13 +4,13 @@
 
 Kubernetes creates Docker containers from images that were built elsewhere and pushed to a Docker registry. Building Docker images is a foundational use-case in Docker-based workflows for application development and deployment. Without support for builds in Kubernetes, if a system administrator wanted a system that could build images, he or she would have to select a pre-existing build system or write a new one, and then figure out how to deploy and maintain it on or off Kubernetes. However, in most cases operators would wish to leverage the ability of Kubernetes to schedule task execution into a pool of available resources, and most build systems would want to take advantage of that mechanism.
 
-Offering an API for builds makes OpenShift a viable backend for arbitrary third-party Docker image build systems which require resource constrainment and scheduling capabilities, and allows organizations to orchestrate Docker builds from their existing continuous integration processes. OpenShift enables CI/CD flows around Docker images.
+Offering an API for builds makes OpenShift a viable back-end for arbitrary third-party Docker image build systems which require resource constraints and scheduling capabilities, and allows organizations to orchestrate Docker builds from their existing continuous integration processes. OpenShift enables CI/CD flows around Docker images.
 
 Most build jobs share common characteristics - a set of inputs to a build, the need to run a certain build process to completion, the capture of the logs from that build process, publishing resources from successful builds, and the final status of the build. In addition, the image-driven deployment flow that Kubernetes advocates depends on having images available.
 
 Builds should take advantage of resource restrictions – specifying limitations on things such as CPU usage, memory usage, and build (pod) execution time – once support for this exists in Kubernetes. Additionally, builds should be repeatable and consistent (same inputs = same output).
 
-Alhtough there are potentially several different types of builds that produce other types of output, OpenShift by default provides the ability to build Docker images.
+Although there are potentially several different types of builds that produce other types of output, OpenShift by default provides the ability to build Docker images.
 
 Here are some possible user scenarios for builds in OpenShift:
 
@@ -29,7 +29,7 @@ Company Y wants to leverage OpenShift to build Docker images, but their Devops S
 
 ## Build Strategies
 
-The OpenShift build system provides extensible support for build strategies based on selectable types specified in the build API. By default, two strategies are supported: Docker builds, and [Source-To-Images (sti)](https://github.com/openshift/geard/tree/master/cmd/sti) builds.
+The OpenShift build system provides extensible support for build strategies based on selectable types specified in the build API. By default, two strategies are supported: Docker builds, and [Source-To-Images (sti)](https://github.com/openshift/source-to-image) builds.
 
 ### Docker Builds
 
@@ -67,14 +67,49 @@ In practice, however, there are (at present) some serious problems with the appr
 1.  Requires a privileged container, which is a show-stopping security concern with no solution on the horizon
     * In addition, this nullifies the theoretical benefit of cgroups isolation, as the process could break out the container
 2.  With devicemapper, it's very easy to leak both loopback devices and storage on the host
-3.  No easy way to share storage of images/layers among build containers, requiring each Docker-in-Docker instance to store its own unique, full copy of any image(s) downloaded during the build process. 
+3.  No easy way to share storage of images/layers among build containers, requiring each Docker-in-Docker instance to store its own unique, full copy of any image(s) downloaded during the build process.
     * A caching proxy running on the node could at least minimize the number of times an image is pulled from a remote registry, but that doesn’t eliminate the need for each build container to have its own copy of the images.
 
 For these reasons, Docker-in-Docker is not considered a viable build strategy for a secure, multi-tenant production environment.
 
 ### STI (Source-to-Image) Builds
 
-OpenShift also supports [Source-To-Images (sti)](https://github.com/openshift/geard/tree/master/cmd/sti) builds.
+OpenShift also supports [Source-To-Images (sti)](https://github.com/openshift/source-to-image) builds.
 
-Source-to-images (sti) is a tool for building reproducable Docker images. It produces ready-to-run images by injecting a user source into a docker image and assembling a new Docker image which incorporates the base image and built source, and is ready to use with `docker run`. STI supports incremental builds which re-use previously downloaded dependencies, previously built artifacts, etc.
+Source-to-images (sti) is a tool for building reproducible Docker images. It produces ready-to-run images by injecting a user source into a docker image and assembling a new Docker image which incorporates the base image and built source, and is ready to use with `docker run`. STI supports incremental builds which re-use previously downloaded dependencies, previously built artifacts, etc.
+
+### Custom Builds
+
+The custom build strategy is very similar to *Docker build* strategy, but users might
+customize the builder image that will be used for build execution. The *Docker build* uses [openshift/docker-builder](https://registry.hub.docker.com/u/openshift/docker-builder/) image by default. Using your own builder image allows you to customize your build process.
+
+An example JSON of a custom build strategy:
+
+```json
+"strategy": {
+  "type": "Custom",
+    "customStrategy": {
+      "image": "my-custom-builder-image",
+      "exposeDockerSocket": true,
+      "env": [
+        { "name": "EXPOSE_PORT", "value": "8080" }
+      ]
+    }
+}
+```
+
+The `exposeDockerSocket` option will mount the Docker socket from host into your
+builder container and allows you to execute the `docker build` and `docker push` commands.
+Note that this might be restricted by the administrator in future.
+
+The `env` option allows you to specify additional environment variables that will
+be passed to the builder container environment. By default, these environment
+variables are passed to the build container:
+
+* `$BUILD` contains the JSON representation of the Build
+* `$OUTPUT_IMAGE` contains the output Docker image name as configured in Build
+* `$OUTPUT_REGISTRY` contains the output Docker registry as configured in Build
+* `$SOURCE_URI` contains the URL to the source code repository
+* `$SOURCE_REF` contains the branch, tag or ref for source repository
+* `$DOCKER_SOCKET` contains full path to the Docker socket
 

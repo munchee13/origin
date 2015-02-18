@@ -3,63 +3,156 @@
 package integration
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"reflect"
 	"testing"
 
-	klatest "github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/master"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/version"
 
-	"github.com/openshift/origin/pkg/api/latest"
-	"github.com/openshift/origin/pkg/api/v1beta1"
-	"github.com/openshift/origin/pkg/build/api"
-	buildregistry "github.com/openshift/origin/pkg/build/registry/build"
-	buildconfigregistry "github.com/openshift/origin/pkg/build/registry/buildconfig"
-	buildetcd "github.com/openshift/origin/pkg/build/registry/etcd"
-	osclient "github.com/openshift/origin/pkg/client"
+	buildapi "github.com/openshift/origin/pkg/build/api"
 )
 
 func init() {
 	requireEtcd()
 }
 
-func TestBuildConfigClient(t *testing.T) {
-	etcdClient := newEtcdClient()
-	helper, _ := master.NewEtcdHelper(etcdClient.GetCluster(), klatest.Version)
-	m := master.New(&master.Config{
-		EtcdHelper: helper,
-	})
-	interfaces, _ := latest.InterfacesFor(latest.Version)
-	buildRegistry := buildetcd.New(tools.EtcdHelper{etcdClient, interfaces.Codec, interfaces.ResourceVersioner})
-	storage := map[string]apiserver.RESTStorage{
-		"builds":       buildregistry.NewREST(buildRegistry),
-		"buildConfigs": buildconfigregistry.NewREST(buildRegistry),
-	}
+func TestListBuildConfigs(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
 
-	osMux := http.NewServeMux()
-	apiserver.NewAPIGroup(m.API_v1beta1()).InstallREST(osMux, "/api/v1beta1")
-	apiserver.NewAPIGroup(storage, v1beta1.Codec, "/osapi/v1beta1", interfaces.SelfLinker).InstallREST(osMux, "/osapi/v1beta1")
-	apiserver.InstallSupport(osMux)
-	s := httptest.NewServer(osMux)
-
-	kubeclient := client.NewOrDie(&client.Config{Host: s.URL, Version: klatest.Version})
-	osClient := osclient.NewOrDie(&client.Config{Host: s.URL, Version: latest.Version})
-
-	info, err := kubeclient.ServerVersion()
+	buildConfigs, err := openshift.Client.BuildConfigs(testNamespace).List(labels.Everything(), labels.Everything())
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Unexpected error %v", err)
 	}
-	if e, a := version.Get(), *info; !reflect.DeepEqual(e, a) {
-		t.Errorf("expected %#v, got %#v", e, a)
+	if len(buildConfigs.Items) != 0 {
+		t.Errorf("Expected no buildConfigs, got %#v", buildConfigs.Items)
+	}
+}
+
+func TestCreateBuildConfig(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+	buildConfig := mockBuildConfig()
+
+	expected, err := openshift.Client.BuildConfigs(testNamespace).Create(buildConfig)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if expected.Name == "" {
+		t.Errorf("Unexpected empty buildConfig ID %v", expected)
 	}
 
-	buildConfigs, err := osClient.ListBuildConfigs(labels.Everything())
+	buildConfigs, err := openshift.Client.BuildConfigs(testNamespace).List(labels.Everything(), labels.Everything())
+	if err != nil {
+		t.Fatalf("Unexpected error %v", err)
+	}
+	if len(buildConfigs.Items) != 1 {
+		t.Errorf("Expected one buildConfig, got %#v", buildConfigs.Items)
+	}
+}
+
+func TestUpdateBuildConfig(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+	buildConfig := mockBuildConfig()
+
+	actual, err := openshift.Client.BuildConfigs(testNamespace).Create(buildConfig)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	actual, err = openshift.Client.BuildConfigs(testNamespace).Get(actual.Name)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if _, err := openshift.Client.BuildConfigs(testNamespace).Update(actual); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
+func TestDeleteBuildConfig(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+	buildConfig := mockBuildConfig()
+
+	actual, err := openshift.Client.BuildConfigs(testNamespace).Create(buildConfig)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if err := openshift.Client.BuildConfigs(testNamespace).Delete(actual.Name); err != nil {
+		t.Fatalf("Unxpected error: %v", err)
+	}
+}
+
+func TestWatchBuildConfigs(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+	buildConfig := mockBuildConfig()
+
+	watch, err := openshift.Client.BuildConfigs(testNamespace).Watch(labels.Everything(), labels.Everything(), "0")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer watch.Stop()
+
+	expected, err := openshift.Client.BuildConfigs(testNamespace).Create(buildConfig)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	event := <-watch.ResultChan()
+	actual := event.Object.(*buildapi.BuildConfig)
+
+	if e, a := expected.Name, actual.Name; e != a {
+		t.Errorf("Expected buildConfig Name %s, got %s", e, a)
+	}
+}
+
+func mockBuildConfig() *buildapi.BuildConfig {
+	return &buildapi.BuildConfig{
+		ObjectMeta: kapi.ObjectMeta{
+			Labels: map[string]string{
+				"label1": "value1",
+				"label2": "value2",
+			},
+		},
+		Triggers: []buildapi.BuildTriggerPolicy{
+			{
+				Type: buildapi.GithubWebHookBuildTriggerType,
+				GithubWebHook: &buildapi.WebHookTrigger{
+					Secret: "secret101",
+				},
+			},
+		},
+		Parameters: buildapi.BuildParameters{
+			Source: buildapi.BuildSource{
+				Type: buildapi.BuildSourceGit,
+				Git: &buildapi.GitBuildSource{
+					URI: "http://my.docker/build",
+				},
+			},
+			Strategy: buildapi.BuildStrategy{
+				Type: buildapi.DockerBuildStrategyType,
+				DockerStrategy: &buildapi.DockerBuildStrategy{
+					ContextDir: "context",
+				},
+			},
+			Output: buildapi.BuildOutput{
+				DockerImageReference: "namespace/builtimage",
+			},
+		},
+	}
+}
+
+func TestBuildConfigClient(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+
+	buildConfigs, err := openshift.Client.BuildConfigs(testNamespace).List(labels.Everything(), labels.Everything())
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -68,35 +161,43 @@ func TestBuildConfigClient(t *testing.T) {
 	}
 
 	// get a validation error
-	buildConfig := &api.BuildConfig{
-		Labels: map[string]string{
-			"label1": "value1",
-			"label2": "value2",
+	buildConfig := &buildapi.BuildConfig{
+		ObjectMeta: kapi.ObjectMeta{
+			Labels: map[string]string{
+				"label1": "value1",
+				"label2": "value2",
+			},
 		},
-		DesiredInput: api.BuildInput{
-			Type:         api.DockerBuildType,
-			SourceURI:    "http://my.docker/build",
-			ImageTag:     "namespace/builtimage",
-			BuilderImage: "anImage",
+		Parameters: buildapi.BuildParameters{
+			Source: buildapi.BuildSource{
+				Type: buildapi.BuildSourceGit,
+				Git: &buildapi.GitBuildSource{
+					URI: "http://my.docker/build",
+				},
+			},
+			Strategy: buildapi.BuildStrategy{
+				Type: buildapi.DockerBuildStrategyType,
+				DockerStrategy: &buildapi.DockerBuildStrategy{
+					ContextDir: "context",
+				},
+			},
+			Output: buildapi.BuildOutput{
+				DockerImageReference: "namespace/builtimage",
+			},
 		},
-	}
-	got, err := osClient.CreateBuildConfig(buildConfig)
-	if err == nil {
-		t.Fatalf("unexpected non-error: %v", err)
 	}
 
 	// get a created buildConfig
-	buildConfig.DesiredInput.BuilderImage = ""
-	got, err = osClient.CreateBuildConfig(buildConfig)
+	got, err := openshift.Client.BuildConfigs(testNamespace).Create(buildConfig)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.ID == "" {
+	if got.Name == "" {
 		t.Errorf("unexpected empty buildConfig ID %v", got)
 	}
 
 	// get a list of buildConfigs
-	buildConfigs, err = osClient.ListBuildConfigs(labels.Everything())
+	buildConfigs, err = openshift.Client.BuildConfigs(testNamespace).List(labels.Everything(), labels.Everything())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,16 +205,16 @@ func TestBuildConfigClient(t *testing.T) {
 		t.Errorf("expected one buildConfig, got %#v", buildConfigs)
 	}
 	actual := buildConfigs.Items[0]
-	if actual.ID != got.ID {
+	if actual.Name != got.Name {
 		t.Errorf("expected buildConfig %#v, got %#v", got, actual)
 	}
 
 	// delete a buildConfig
-	err = osClient.DeleteBuildConfig(got.ID)
+	err = openshift.Client.BuildConfigs(testNamespace).Delete(got.Name)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
-	buildConfigs, err = osClient.ListBuildConfigs(labels.Everything())
+	buildConfigs, err = openshift.Client.BuildConfigs(testNamespace).List(labels.Everything(), labels.Everything())
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}

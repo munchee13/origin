@@ -1,12 +1,14 @@
 package route
 
 import (
+	"net/http"
 	"strings"
 	"testing"
-	"time"
 
-	kubeapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	kclient "github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
+
 	"github.com/openshift/origin/pkg/route/api"
 	"github.com/openshift/origin/pkg/route/registry/test"
 )
@@ -21,7 +23,7 @@ func TestListRoutesEmptyList(t *testing.T) {
 		registry: mockRegistry,
 	}
 
-	routes, err := storage.List(nil, labels.Everything(), labels.Everything())
+	routes, err := storage.List(kapi.NewDefaultContext(), labels.Everything(), labels.Everything())
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
@@ -36,13 +38,13 @@ func TestListRoutesPopulatedList(t *testing.T) {
 	mockRegistry.Routes = &api.RouteList{
 		Items: []api.Route{
 			{
-				JSONBase: kubeapi.JSONBase{
-					ID: "foo",
+				ObjectMeta: kapi.ObjectMeta{
+					Name: "foo",
 				},
 			},
 			{
-				JSONBase: kubeapi.JSONBase{
-					ID: "bar",
+				ObjectMeta: kapi.ObjectMeta{
+					Name: "bar",
 				},
 			},
 		},
@@ -52,7 +54,7 @@ func TestListRoutesPopulatedList(t *testing.T) {
 		registry: mockRegistry,
 	}
 
-	list, err := storage.List(nil, labels.Everything(), labels.Everything())
+	list, err := storage.List(kapi.NewDefaultContext(), labels.Everything(), labels.Everything())
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
@@ -67,9 +69,9 @@ func TestListRoutesPopulatedList(t *testing.T) {
 func TestCreateRouteBadObject(t *testing.T) {
 	storage := REST{}
 
-	channel, err := storage.Create(nil, &api.RouteList{})
-	if channel != nil {
-		t.Errorf("Expected nil, got %v", channel)
+	obj, err := storage.Create(kapi.NewDefaultContext(), &api.RouteList{})
+	if obj != nil {
+		t.Errorf("Expected nil, got %v", obj)
 	}
 	if strings.Index(err.Error(), "not a route") == -1 {
 		t.Errorf("Expected 'not a route' error, got '%v'", err.Error())
@@ -80,30 +82,24 @@ func TestCreateRouteOK(t *testing.T) {
 	mockRegistry := test.NewRouteRegistry()
 	storage := REST{registry: mockRegistry}
 
-	channel, err := storage.Create(nil, &api.Route{
-		JSONBase:    kubeapi.JSONBase{ID: "foo"},
+	obj, err := storage.Create(kapi.NewDefaultContext(), &api.Route{
+		ObjectMeta:  kapi.ObjectMeta{Name: "foo"},
 		Host:        "www.frontend.com",
 		ServiceName: "myrubyservice",
 	})
-	if channel == nil {
-		t.Errorf("Expected nil channel, got %v", channel)
+	if obj == nil {
+		t.Errorf("Expected nil obj, got %v", obj)
 	}
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
 
-	select {
-	case result := <-channel:
-		route, ok := result.(*api.Route)
-		if !ok {
-			t.Errorf("Expected route type, got: %#v", result)
-		}
-		if route.ID != "foo" {
-			t.Errorf("Unexpected route: %#v", route)
-		}
-	case <-time.After(50 * time.Millisecond):
-		t.Errorf("Timed out waiting for result")
-	default:
+	route, ok := obj.(*api.Route)
+	if !ok {
+		t.Errorf("Expected route type, got: %#v", obj)
+	}
+	if route.Name != "foo" {
+		t.Errorf("Unexpected route: %#v", route)
 	}
 }
 
@@ -111,7 +107,7 @@ func TestGetRouteError(t *testing.T) {
 	mockRegistry := test.NewRouteRegistry()
 	storage := REST{registry: mockRegistry}
 
-	route, err := storage.Get(nil, "foo")
+	route, err := storage.Get(kapi.NewDefaultContext(), "foo")
 	if route != nil {
 		t.Errorf("Unexpected non-nil route: %#v", route)
 	}
@@ -126,20 +122,20 @@ func TestGetRouteOK(t *testing.T) {
 	mockRegistry.Routes = &api.RouteList{
 		Items: []api.Route{
 			{
-				JSONBase: kubeapi.JSONBase{ID: "foo"},
+				ObjectMeta: kapi.ObjectMeta{Name: "foo"},
 			},
 		},
 	}
 	storage := REST{registry: mockRegistry}
 
-	route, err := storage.Get(nil, "foo")
+	route, err := storage.Get(kapi.NewDefaultContext(), "foo")
 	if route == nil {
 		t.Error("Unexpected nil route")
 	}
 	if err != nil {
 		t.Errorf("Unexpected non-nil error", err)
 	}
-	if route.(*api.Route).ID != "foo" {
+	if route.(*api.Route).Name != "foo" {
 		t.Errorf("Unexpected route: %#v", route)
 	}
 }
@@ -147,9 +143,9 @@ func TestGetRouteOK(t *testing.T) {
 func TestUpdateRouteBadObject(t *testing.T) {
 	storage := REST{}
 
-	channel, err := storage.Update(nil, &api.RouteList{})
-	if channel != nil {
-		t.Errorf("Expected nil, got %v", channel)
+	obj, created, err := storage.Update(kapi.NewDefaultContext(), &api.RouteList{})
+	if obj != nil || created {
+		t.Errorf("Expected nil, got %v", obj)
 	}
 	if strings.Index(err.Error(), "not a route:") == -1 {
 		t.Errorf("Expected 'not a route' error, got %v", err)
@@ -159,12 +155,12 @@ func TestUpdateRouteBadObject(t *testing.T) {
 func TestUpdateRouteMissingID(t *testing.T) {
 	storage := REST{}
 
-	channel, err := storage.Update(nil, &api.Route{})
-	if channel != nil {
-		t.Errorf("Expected nil, got %v", channel)
+	obj, created, err := storage.Update(kapi.NewDefaultContext(), &api.Route{})
+	if obj != nil || created {
+		t.Errorf("Expected nil, got %v", obj)
 	}
-	if strings.Index(err.Error(), "id is unspecified:") == -1 {
-		t.Errorf("Expected 'id is unspecified' error, got %v", err)
+	if strings.Index(err.Error(), "name is unspecified:") == -1 {
+		t.Errorf("Expected 'name is unspecified' error, got %v", err)
 	}
 }
 
@@ -172,21 +168,13 @@ func TestUpdateRegistryErrorSaving(t *testing.T) {
 	mockRepositoryRegistry := test.NewRouteRegistry()
 	storage := REST{registry: mockRepositoryRegistry}
 
-	channel, err := storage.Update(nil, &api.Route{
-		JSONBase:    kubeapi.JSONBase{ID: "foo"},
+	_, _, err := storage.Update(kapi.NewDefaultContext(), &api.Route{
+		ObjectMeta:  kapi.ObjectMeta{Name: "foo"},
 		Host:        "www.frontend.com",
 		ServiceName: "rubyservice",
 	})
-	if err != nil {
+	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("Unexpected non-nil error: %#v", err)
-	}
-	result := <-channel
-	status, ok := result.(*kubeapi.Status)
-	if !ok {
-		t.Errorf("Expected status, got %#v", result)
-	}
-	if status.Status != kubeapi.StatusFailure || status.Message != "Route foo not found" {
-		t.Errorf("Expected status=failure, message=Route foo not found, got %#v", status)
 	}
 }
 
@@ -195,7 +183,7 @@ func TestUpdateRouteOK(t *testing.T) {
 	mockRepositoryRegistry.Routes = &api.RouteList{
 		Items: []api.Route{
 			{
-				JSONBase:    kubeapi.JSONBase{ID: "bar"},
+				ObjectMeta:  kapi.ObjectMeta{Name: "bar"},
 				Host:        "www.frontend.com",
 				ServiceName: "rubyservice",
 			},
@@ -204,25 +192,24 @@ func TestUpdateRouteOK(t *testing.T) {
 
 	storage := REST{registry: mockRepositoryRegistry}
 
-	channel, err := storage.Update(nil, &api.Route{
-		JSONBase:    kubeapi.JSONBase{ID: "bar"},
+	obj, created, err := storage.Update(kapi.NewDefaultContext(), &api.Route{
+		ObjectMeta:  kapi.ObjectMeta{Name: "bar"},
 		Host:        "www.newfrontend.com",
 		ServiceName: "newrubyservice",
 	})
 
-	if err != nil {
+	if err != nil || created {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
-	result := <-channel
-	route, ok := result.(*api.Route)
+	route, ok := obj.(*api.Route)
 	if !ok {
-		t.Errorf("Expected Route, got %#v", result)
+		t.Errorf("Expected Route, got %#v", obj)
 	}
 	if route == nil {
 		t.Errorf("Nil route returned: %#v", route)
-		t.Errorf("Expected Route, got %#v", result)
+		t.Errorf("Expected Route, got %#v", obj)
 	}
-	if route.ID != "bar" {
+	if route.Name != "bar" {
 		t.Errorf("Unexpected route returned: %#v", route)
 	}
 	if route.Host != "www.newfrontend.com" {
@@ -236,7 +223,7 @@ func TestUpdateRouteOK(t *testing.T) {
 func TestDeleteRouteError(t *testing.T) {
 	mockRegistry := test.NewRouteRegistry()
 	storage := REST{registry: mockRegistry}
-	_, err := storage.Delete(nil, "foo")
+	_, err := storage.Delete(kapi.NewDefaultContext(), "foo")
 	if err == nil {
 		t.Errorf("Unexpected nil error: %#v", err)
 	}
@@ -250,30 +237,74 @@ func TestDeleteRouteOk(t *testing.T) {
 	mockRegistry.Routes = &api.RouteList{
 		Items: []api.Route{
 			{
-				JSONBase: kubeapi.JSONBase{ID: "foo"},
+				ObjectMeta: kapi.ObjectMeta{Name: "foo"},
 			},
 		},
 	}
 	storage := REST{registry: mockRegistry}
-	channel, err := storage.Delete(nil, "foo")
-	if channel == nil {
-		t.Error("Unexpected nil channel")
+	obj, err := storage.Delete(kapi.NewDefaultContext(), "foo")
+	if obj == nil {
+		t.Error("Unexpected nil obj")
 	}
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
 
-	select {
-	case result := <-channel:
-		status, ok := result.(*kubeapi.Status)
-		if !ok {
-			t.Errorf("Expected status type, got: %#v", result)
-		}
-		if status.Status != kubeapi.StatusSuccess {
-			t.Errorf("Expected status=success, got: %#v", status)
-		}
-	case <-time.After(50 * time.Millisecond):
-		t.Errorf("Timed out waiting for result")
-	default:
+	status, ok := obj.(*kapi.Status)
+	if !ok {
+		t.Errorf("Expected status type, got: %#v", obj)
 	}
+	if status.Status != kapi.StatusSuccess {
+		t.Errorf("Expected status=success, got: %#v", status)
+	}
+}
+
+func TestCreateRouteConflictingNamespace(t *testing.T) {
+	storage := REST{}
+
+	obj, err := storage.Create(kapi.WithNamespace(kapi.NewContext(), "legal-name"), &api.Route{
+		ObjectMeta: kapi.ObjectMeta{Name: "foo", Namespace: "some-value"},
+	})
+
+	if obj != nil {
+		t.Error("Expected a nil obj, but we got a value")
+	}
+
+	checkExpectedNamespaceError(t, err)
+}
+
+func TestUpdateRouteConflictingNamespace(t *testing.T) {
+	mockRepositoryRegistry := test.NewRouteRegistry()
+	storage := REST{registry: mockRepositoryRegistry}
+
+	obj, created, err := storage.Update(kapi.WithNamespace(kapi.NewContext(), "legal-name"), &api.Route{
+		ObjectMeta:  kapi.ObjectMeta{Name: "bar", Namespace: "some-value"},
+		Host:        "www.newfrontend.com",
+		ServiceName: "newrubyservice",
+	})
+
+	if obj != nil || created {
+		t.Error("Expected a nil obj, but we got a value")
+	}
+
+	checkExpectedNamespaceError(t, err)
+}
+
+func checkExpectedNamespaceError(t *testing.T, err error) {
+	expectedError := "Route.Namespace does not match the provided context"
+	if err == nil {
+		t.Errorf("Expected '" + expectedError + "', but we didn't get one")
+	} else {
+		e, ok := err.(kclient.APIStatus)
+		if !ok {
+			t.Errorf("error was not a statusError: %v", err)
+		}
+		if e.Status().Code != http.StatusConflict {
+			t.Errorf("Unexpected failure status: %v", e.Status())
+		}
+		if strings.Index(err.Error(), expectedError) == -1 {
+			t.Errorf("Expected '"+expectedError+"' error, got '%v'", err.Error())
+		}
+	}
+
 }

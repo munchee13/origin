@@ -20,72 +20,87 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/service"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 
 	"github.com/golang/glog"
 )
 
-// EndpointController manages service endpoints.
+// EndpointController manages selector-based service endpoints.
 type EndpointController struct {
-	client          *client.Client
-	serviceRegistry service.Registry
+	client *client.Client
 }
 
 // NewEndpointController returns a new *EndpointController.
-func NewEndpointController(serviceRegistry service.Registry, client *client.Client) *EndpointController {
+func NewEndpointController(client *client.Client) *EndpointController {
 	return &EndpointController{
-		serviceRegistry: serviceRegistry,
-		client:          client,
+		client: client,
 	}
 }
 
-// SyncServiceEndpoints syncs service endpoints.
+// SyncServiceEndpoints syncs endpoints for services with selectors.
 func (e *EndpointController) SyncServiceEndpoints() error {
-	ctx := api.NewContext()
-	services, err := e.client.ListServices(ctx, labels.Everything())
+	services, err := e.client.Services(api.NamespaceAll).List(labels.Everything())
 	if err != nil {
 		glog.Errorf("Failed to list services: %v", err)
 		return err
 	}
 	var resultErr error
 	for _, service := range services.Items {
-		nsCtx := api.WithNamespace(ctx, service.Namespace)
-		pods, err := e.client.ListPods(nsCtx, labels.Set(service.Selector).AsSelector())
+		if service.Spec.Selector == nil {
+			// services without a selector receive no endpoints from this controller;
+			// these services will receive the endpoints that are created out-of-band via the REST API.
+			continue
+		}
+
+		glog.V(5).Infof("About to update endpoints for service %s/%s", service.Namespace, service.Name)
+		pods, err := e.client.Pods(service.Namespace).List(labels.Set(service.Spec.Selector).AsSelector())
 		if err != nil {
-			glog.Errorf("Error syncing service: %#v, skipping.", service)
+			glog.Errorf("Error syncing service: %s/%s, skipping", service.Namespace, service.Name)
 			resultErr = err
 			continue
 		}
-		endpoints := make([]string, len(pods.Items))
-		for ix, pod := range pods.Items {
-			port, err := findPort(&pod.DesiredState.Manifest, service.ContainerPort)
+		endpoints := []string{}
+
+		for _, pod := range pods.Items {
+			port, err := findPort(&pod, service.Spec.ContainerPort)
 			if err != nil {
-				glog.Errorf("Failed to find port for service: %v, %v", service, err)
+				glog.Errorf("Failed to find port for service %s/%s: %v", service.Namespace, service.Name, err)
 				continue
 			}
-			if len(pod.CurrentState.PodIP) == 0 {
-				glog.Errorf("Failed to find an IP for pod: %v", pod)
+			if len(pod.Status.PodIP) == 0 {
+				glog.Errorf("Failed to find an IP for pod %s/%s", pod.Namespace, pod.Name)
 				continue
 			}
-			endpoints[ix] = net.JoinHostPort(pod.CurrentState.PodIP, strconv.Itoa(port))
+
+			inService := false
+			for _, c := range pod.Status.Conditions {
+				if c.Kind == api.PodReady && c.Status == api.ConditionFull {
+					inService = true
+					break
+				}
+			}
+			if !inService {
+				glog.V(5).Infof("Pod is out of service: %v/%v", pod.Namespace, pod.Name)
+				continue
+			}
+
+			endpoints = append(endpoints, net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(port)))
 		}
-		currentEndpoints, err := e.client.GetEndpoints(nsCtx, service.ID)
+		currentEndpoints, err := e.client.Endpoints(service.Namespace).Get(service.Name)
 		if err != nil {
-			// TODO this is brittle as all get out, refactor the client libraries to return a structured error.
-			if strings.Contains(err.Error(), "not found") {
+			if errors.IsNotFound(err) {
 				currentEndpoints = &api.Endpoints{
-					JSONBase: api.JSONBase{
-						ID: service.ID,
+					ObjectMeta: api.ObjectMeta{
+						Name: service.Name,
 					},
 				}
 			} else {
-				glog.Errorf("Error getting endpoints: %#v", err)
+				glog.Errorf("Error getting endpoints: %v", err)
 				continue
 			}
 		}
@@ -93,19 +108,19 @@ func (e *EndpointController) SyncServiceEndpoints() error {
 		*newEndpoints = *currentEndpoints
 		newEndpoints.Endpoints = endpoints
 
-		if currentEndpoints.ResourceVersion == 0 {
+		if len(currentEndpoints.ResourceVersion) == 0 {
 			// No previous endpoints, create them
-			_, err = e.client.CreateEndpoints(nsCtx, newEndpoints)
+			_, err = e.client.Endpoints(service.Namespace).Create(newEndpoints)
 		} else {
 			// Pre-existing
 			if endpointsEqual(currentEndpoints, endpoints) {
-				glog.V(2).Infof("endpoints are equal for %s, skipping update", service.ID)
+				glog.V(5).Infof("endpoints are equal for %s/%s, skipping update", service.Namespace, service.Name)
 				continue
 			}
-			_, err = e.client.UpdateEndpoints(nsCtx, newEndpoints)
+			_, err = e.client.Endpoints(service.Namespace).Update(newEndpoints)
 		}
 		if err != nil {
-			glog.Errorf("Error updating endpoints: %#v", err)
+			glog.Errorf("Error updating endpoints: %v", err)
 			continue
 		}
 	}
@@ -137,22 +152,37 @@ func endpointsEqual(e *api.Endpoints, endpoints []string) bool {
 }
 
 // findPort locates the container port for the given manifest and portName.
-func findPort(manifest *api.ContainerManifest, portName util.IntOrString) (int, error) {
-	if ((portName.Kind == util.IntstrString && len(portName.StrVal) == 0) ||
-		(portName.Kind == util.IntstrInt && portName.IntVal == 0)) &&
-		len(manifest.Containers[0].Ports) > 0 {
-		return manifest.Containers[0].Ports[0].ContainerPort, nil
+func findPort(pod *api.Pod, portName util.IntOrString) (int, error) {
+	firstContainerPort := 0
+	if len(pod.Spec.Containers) > 0 && len(pod.Spec.Containers[0].Ports) > 0 {
+		firstContainerPort = pod.Spec.Containers[0].Ports[0].ContainerPort
 	}
-	if portName.Kind == util.IntstrInt {
-		return portName.IntVal, nil
-	}
-	name := portName.StrVal
-	for _, container := range manifest.Containers {
-		for _, port := range container.Ports {
-			if port.Name == name {
-				return port.ContainerPort, nil
+
+	switch portName.Kind {
+	case util.IntstrString:
+		if len(portName.StrVal) == 0 {
+			if firstContainerPort != 0 {
+				return firstContainerPort, nil
+			}
+			break
+		}
+		name := portName.StrVal
+		for _, container := range pod.Spec.Containers {
+			for _, port := range container.Ports {
+				if port.Name == name {
+					return port.ContainerPort, nil
+				}
 			}
 		}
+	case util.IntstrInt:
+		if portName.IntVal == 0 {
+			if firstContainerPort != 0 {
+				return firstContainerPort, nil
+			}
+			break
+		}
+		return portName.IntVal, nil
 	}
-	return -1, fmt.Errorf("no suitable port for manifest: %s", manifest.ID)
+
+	return 0, fmt.Errorf("no suitable port for manifest: %s", pod.UID)
 }

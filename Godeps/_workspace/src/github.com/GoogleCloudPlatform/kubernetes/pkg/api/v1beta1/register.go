@@ -26,22 +26,63 @@ var Codec = runtime.CodecFor(api.Scheme, "v1beta1")
 
 func init() {
 	api.Scheme.AddKnownTypes("v1beta1",
-		&PodList{},
 		&Pod{},
-		&ReplicationControllerList{},
+		&PodStatusResult{},
+		&PodList{},
 		&ReplicationController{},
-		&ServiceList{},
+		&ReplicationControllerList{},
 		&Service{},
-		&MinionList{},
-		&Minion{},
-		&Status{},
-		&ServerOpList{},
-		&ServerOp{},
-		&ContainerManifestList{},
+		&ServiceList{},
 		&Endpoints{},
 		&EndpointsList{},
+		&Minion{},
+		&MinionList{},
 		&Binding{},
+		&Status{},
 		&Event{},
 		&EventList{},
+		&ContainerManifest{},
+		&ContainerManifestList{},
+		&BoundPod{},
+		&BoundPods{},
+		&List{},
+		&LimitRange{},
+		&LimitRangeList{},
+		&ResourceQuota{},
+		&ResourceQuotaList{},
+		&ResourceQuotaUsage{},
+		&Namespace{},
+		&NamespaceList{},
 	)
+	// Future names are supported
+	api.Scheme.AddKnownTypeWithName("v1beta1", "Node", &Minion{})
+	api.Scheme.AddKnownTypeWithName("v1beta1", "NodeList", &MinionList{})
 }
+
+func (*Pod) IsAnAPIObject()                       {}
+func (*PodStatusResult) IsAnAPIObject()           {}
+func (*PodList) IsAnAPIObject()                   {}
+func (*ReplicationController) IsAnAPIObject()     {}
+func (*ReplicationControllerList) IsAnAPIObject() {}
+func (*Service) IsAnAPIObject()                   {}
+func (*ServiceList) IsAnAPIObject()               {}
+func (*Endpoints) IsAnAPIObject()                 {}
+func (*EndpointsList) IsAnAPIObject()             {}
+func (*Minion) IsAnAPIObject()                    {}
+func (*MinionList) IsAnAPIObject()                {}
+func (*Binding) IsAnAPIObject()                   {}
+func (*Status) IsAnAPIObject()                    {}
+func (*Event) IsAnAPIObject()                     {}
+func (*EventList) IsAnAPIObject()                 {}
+func (*ContainerManifest) IsAnAPIObject()         {}
+func (*ContainerManifestList) IsAnAPIObject()     {}
+func (*BoundPod) IsAnAPIObject()                  {}
+func (*BoundPods) IsAnAPIObject()                 {}
+func (*List) IsAnAPIObject()                      {}
+func (*LimitRange) IsAnAPIObject()                {}
+func (*LimitRangeList) IsAnAPIObject()            {}
+func (*ResourceQuota) IsAnAPIObject()             {}
+func (*ResourceQuotaList) IsAnAPIObject()         {}
+func (*ResourceQuotaUsage) IsAnAPIObject()        {}
+func (*Namespace) IsAnAPIObject()                 {}
+func (*NamespaceList) IsAnAPIObject()             {}

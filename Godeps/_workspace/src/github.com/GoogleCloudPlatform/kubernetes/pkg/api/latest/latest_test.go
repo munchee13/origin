@@ -18,73 +18,21 @@ package latest
 
 import (
 	"encoding/json"
-	"reflect"
+	"math/rand"
 	"testing"
 
 	internal "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	apitesting "github.com/GoogleCloudPlatform/kubernetes/pkg/api/testing"
 	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/api/v1beta1"
 	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/api/v1beta2"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
-	"github.com/fsouza/go-dockerclient"
-	"github.com/google/gofuzz"
-)
-
-// apiObjectFuzzer can randomly populate api objects.
-var apiObjectFuzzer = fuzz.New().NilChance(.5).NumElements(1, 1).Funcs(
-	func(j *internal.JSONBase, c fuzz.Continue) {
-		// We have to customize the randomization of JSONBases because their
-		// APIVersion and Kind must remain blank in memory.
-		j.APIVersion = ""
-		j.Kind = ""
-		j.ID = c.RandString()
-		// TODO: Fix JSON/YAML packages and/or write custom encoding
-		// for uint64's. Somehow the LS *byte* of this is lost, but
-		// only when all 8 bytes are set.
-		j.ResourceVersion = c.RandUint64() >> 8
-		j.SelfLink = c.RandString()
-
-		var sec, nsec int64
-		c.Fuzz(&sec)
-		c.Fuzz(&nsec)
-		j.CreationTimestamp = util.Unix(sec, nsec).Rfc3339Copy()
-	},
-	func(intstr *util.IntOrString, c fuzz.Continue) {
-		// util.IntOrString will panic if its kind is set wrong.
-		if c.RandBool() {
-			intstr.Kind = util.IntstrInt
-			intstr.IntVal = int(c.RandUint64())
-			intstr.StrVal = ""
-		} else {
-			intstr.Kind = util.IntstrString
-			intstr.IntVal = 0
-			intstr.StrVal = c.RandString()
-		}
-	},
-	func(u64 *uint64, c fuzz.Continue) {
-		// TODO: uint64's are NOT handled right.
-		*u64 = c.RandUint64() >> 8
-	},
-	func(pb map[docker.Port][]docker.PortBinding, c fuzz.Continue) {
-		// This is necessary because keys with nil values get omitted.
-		// TODO: Is this a bug?
-		pb[docker.Port(c.RandString())] = []docker.PortBinding{
-			{c.RandString(), c.RandString()},
-			{c.RandString(), c.RandString()},
-		}
-	},
-	func(pm map[string]docker.PortMapping, c fuzz.Continue) {
-		// This is necessary because keys with nil values get omitted.
-		// TODO: Is this a bug?
-		pm[c.RandString()] = docker.PortMapping{
-			c.RandString(): c.RandString(),
-		}
-	},
 )
 
 func TestInternalRoundTrip(t *testing.T) {
 	latest := "v1beta2"
 
+	seed := rand.Int63()
+	apiObjectFuzzer := apitesting.FuzzerFor(t, "", rand.NewSource(seed))
 	for k := range internal.Scheme.KnownTypes("") {
 		obj, err := internal.Scheme.New("", k)
 		if err != nil {
@@ -101,6 +49,7 @@ func TestInternalRoundTrip(t *testing.T) {
 
 		if err := internal.Scheme.Convert(obj, newer); err != nil {
 			t.Errorf("unable to convert %#v to %#v: %v", obj, newer, err)
+			continue
 		}
 
 		actual, err := internal.Scheme.New("", k)
@@ -111,22 +60,32 @@ func TestInternalRoundTrip(t *testing.T) {
 
 		if err := internal.Scheme.Convert(newer, actual); err != nil {
 			t.Errorf("unable to convert %#v to %#v: %v", newer, actual, err)
+			continue
 		}
 
-		if !reflect.DeepEqual(obj, actual) {
-			t.Errorf("%s: diff %s", k, runtime.ObjectDiff(obj, actual))
+		if !internal.Semantic.DeepEqual(obj, actual) {
+			t.Errorf("%s: diff %s", k, util.ObjectDiff(obj, actual))
 		}
 	}
 }
 
 func TestResourceVersioner(t *testing.T) {
-	pod := internal.Pod{JSONBase: internal.JSONBase{ResourceVersion: 10}}
+	pod := internal.Pod{ObjectMeta: internal.ObjectMeta{ResourceVersion: "10"}}
 	version, err := ResourceVersioner.ResourceVersion(&pod)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if version != 10 {
-		t.Errorf("unexpected version %d", version)
+	if version != "10" {
+		t.Errorf("unexpected version %v", version)
+	}
+
+	podList := internal.PodList{ListMeta: internal.ListMeta{ResourceVersion: "10"}}
+	version, err = ResourceVersioner.ResourceVersion(&podList)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if version != "10" {
+		t.Errorf("unexpected version %v", version)
 	}
 }
 
@@ -152,6 +111,43 @@ func TestInterfacesFor(t *testing.T) {
 	for i, version := range append([]string{Version, OldestVersion}, Versions...) {
 		if vi, err := InterfacesFor(version); err != nil || vi == nil {
 			t.Fatalf("%d: unexpected result: %v", i, err)
+		}
+	}
+}
+
+func TestRESTMapper(t *testing.T) {
+	if v, k, err := RESTMapper.VersionAndKindForResource("replicationControllers"); err != nil || v != Version || k != "ReplicationController" {
+		t.Errorf("unexpected version mapping: %s %s %v", v, k, err)
+	}
+	if v, k, err := RESTMapper.VersionAndKindForResource("replicationcontrollers"); err != nil || v != Version || k != "ReplicationController" {
+		t.Errorf("unexpected version mapping: %s %s %v", v, k, err)
+	}
+
+	for _, version := range Versions {
+		mapping, err := RESTMapper.RESTMapping("ReplicationController", version)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+
+		if mapping.Resource != "replicationControllers" && mapping.Resource != "replicationcontrollers" {
+			t.Errorf("incorrect resource name: %#v", mapping)
+		}
+		if mapping.APIVersion != version {
+			t.Errorf("incorrect version: %v", mapping)
+		}
+
+		interfaces, _ := InterfacesFor(version)
+		if mapping.Codec != interfaces.Codec {
+			t.Errorf("unexpected codec: %#v", mapping)
+		}
+
+		rc := &internal.ReplicationController{ObjectMeta: internal.ObjectMeta{Name: "foo"}}
+		name, err := mapping.MetadataAccessor.Name(rc)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if name != "foo" {
+			t.Errorf("unable to retrieve object meta with: %v", mapping.MetadataAccessor)
 		}
 	}
 }

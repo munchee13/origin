@@ -1,13 +1,16 @@
-FROM fedora:20
-RUN yum -y install docker-io golang golang-src golang-pkg-bin-linux-amd64 golang-pkg-linux-amd64 git && \
-    yum clean all
+#
+# This is the image that executes a STI build inside Origin. It expects the
+# following environment variables:
+#
+#   BUILD - JSON string containing the openshift build object
+#
+# This image expects to have the Docker socket bind-mounted into the container.
+# If "/root/.dockercfg" is bind mounted in, it will use that as authorization to a
+# Docker registry.
+#
+# The standard name for this image is openshift/origin-sti-builder
+#
+FROM openshift/origin
 
-RUN mkdir -p /tmp/go/src/github.com/openshift
-RUN git clone git://github.com/openshift/geard /tmp/go/src/github.com/openshift/geard
-RUN export GOPATH=/tmp/go && \
-    cd /tmp/go/src/github.com/openshift/geard && \
-    ./contrib/build -n && \
-    cp /tmp/go/bin/sti /usr/bin/sti
-
-ADD ./build.sh /opt/build.sh
-CMD ["/opt/build.sh"]
+ENV HOME /root
+ENTRYPOINT ["/usr/bin/openshift-sti-build", "--loglevel=5"]

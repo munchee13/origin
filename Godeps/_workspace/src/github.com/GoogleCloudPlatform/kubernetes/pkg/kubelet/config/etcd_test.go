@@ -19,55 +19,104 @@ package config
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 )
+
+func TestEtcdSourceExistingBoundPods(t *testing.T) {
+	// Arrange
+	key := "/registry/nodes/machine/boundpods"
+	fakeEtcdClient := tools.NewFakeEtcdClient(t)
+	updates := make(chan interface{})
+
+	fakeEtcdClient.Set(
+		key,
+		runtime.EncodeOrDie(latest.Codec, &api.BoundPods{
+			Items: []api.BoundPod{
+				{
+					ObjectMeta: api.ObjectMeta{
+						Name:      "foo",
+						Namespace: "default"},
+					Spec: api.PodSpec{
+						Containers: []api.Container{
+							{
+								Image: "foo:v1",
+							}}}},
+				{
+					ObjectMeta: api.ObjectMeta{
+						Name:      "bar",
+						Namespace: "default"},
+					Spec: api.PodSpec{
+						Containers: []api.Container{
+							{
+								Image: "foo:v1",
+							}}}}}}),
+		0)
+
+	// Act
+	NewSourceEtcd(key, fakeEtcdClient, updates)
+
+	// Assert
+	select {
+	case got := <-updates:
+		update := got.(kubelet.PodUpdate)
+		if len(update.Pods) != 2 ||
+			update.Pods[0].ObjectMeta.Name != "foo" ||
+			update.Pods[1].ObjectMeta.Name != "bar" {
+			t.Errorf("Unexpected update response: %#v", update)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Errorf("Expected update, timeout instead")
+	}
+}
 
 func TestEventToPods(t *testing.T) {
 	tests := []struct {
 		input watch.Event
-		pods  []kubelet.Pod
+		pods  []api.BoundPod
 		fail  bool
 	}{
 		{
 			input: watch.Event{Object: nil},
-			pods:  []kubelet.Pod{},
-			fail:  true,
+			pods:  []api.BoundPod{},
+			fail:  false,
 		},
 		{
-			input: watch.Event{Object: &api.ContainerManifestList{}},
-			pods:  []kubelet.Pod{},
+			input: watch.Event{Object: &api.BoundPods{}},
+			pods:  []api.BoundPod{},
 			fail:  false,
 		},
 		{
 			input: watch.Event{
-				Object: &api.ContainerManifestList{
-					Items: []api.ContainerManifest{
-						{ID: "foo"},
-						{ID: "bar"},
+				Object: &api.BoundPods{
+					Items: []api.BoundPod{
+						{ObjectMeta: api.ObjectMeta{UID: "111", Name: "foo", Namespace: "foo"}},
+						{ObjectMeta: api.ObjectMeta{UID: "222", Name: "bar", Namespace: "bar"}},
 					},
 				},
 			},
-			pods: []kubelet.Pod{
-				{Name: "foo", Manifest: api.ContainerManifest{ID: "foo"}},
-				{Name: "bar", Manifest: api.ContainerManifest{ID: "bar"}},
+			pods: []api.BoundPod{
+				{ObjectMeta: api.ObjectMeta{UID: "111", Name: "foo", Namespace: "foo"}, Spec: api.PodSpec{}},
+				{ObjectMeta: api.ObjectMeta{UID: "222", Name: "bar", Namespace: "bar"}, Spec: api.PodSpec{}},
 			},
 			fail: false,
 		},
 		{
 			input: watch.Event{
-				Object: &api.ContainerManifestList{
-					Items: []api.ContainerManifest{
-						{ID: ""},
-						{ID: ""},
+				Object: &api.BoundPods{
+					Items: []api.BoundPod{
+						{ObjectMeta: api.ObjectMeta{UID: "111", Name: "foo"}},
 					},
 				},
 			},
-			pods: []kubelet.Pod{
-				{Name: "1", Manifest: api.ContainerManifest{ID: ""}},
-				{Name: "2", Manifest: api.ContainerManifest{ID: ""}},
+			pods: []api.BoundPod{
+				{ObjectMeta: api.ObjectMeta{UID: "111", Name: "foo", Namespace: "default"}, Spec: api.PodSpec{}},
 			},
 			fail: false,
 		},

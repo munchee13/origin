@@ -3,11 +3,10 @@
 # Targets (see each target for more information):
 #   all: Build code.
 #   build: Build code.
-#   check: Run tests.
-#   test: Run tests.
-#   run: Run All-in-one server
+#   check: Run unit tests.
+#   test: Run all tests.
+#   run: Run all-in-one server
 #   clean: Clean up.
-#   api: Generate new api docs.
 
 OUT_DIR = _output
 OUT_PKG_DIR = Godeps/_workspace/pkg
@@ -30,7 +29,7 @@ all build:
 	hack/build-go.sh $(WHAT)
 .PHONY: all build
 
-# Build and run tests.
+# Build and run unit tests
 #
 # Args:
 #   WHAT: Directory names to test.  All *_test.go files under these
@@ -40,18 +39,40 @@ all build:
 #
 # Example:
 #   make check
-#   make test
 #   make check WHAT=pkg/build GOFLAGS=-v
-check test:
+check:
 	hack/test-go.sh $(WHAT) $(TESTS)
-.PHONY: check test
+.PHONY: check
+
+# Build and run the complete test-suite.
+#
+# Args:
+#   GOFLAGS: Extra flags to pass to 'go' when building.
+#
+# Example:
+#   make test
+#   make test GOFLAGS=-v
+test: export KUBE_COVER= -cover -covermode=atomic
+test: export KUBE_RACE=  -race
+ifeq ($(SKIP_BUILD), true)
+$(info build is being skipped)
+test: check
+else
+test: build check
+endif
+test:
+	hack/test-cmd.sh
+	KUBE_RACE=" " hack/test-integration.sh $(GOFLAGS)
+	KUBE_RACE=" " hack/test-integration-docker.sh $(GOFLAGS)
+	hack/test-end-to-end.sh
+.PHONY: test
 
 # Run All-in-one OpenShift server.
 #
 # Example:
 #   make run
 run: build
-	$(OUT_DIR)/go/bin/openshift start
+	$(OUT_DIR)/local/go/bin/openshift start
 .PHONY: run
 
 # Remove all build artifacts.
@@ -62,10 +83,11 @@ clean:
 	rm -rf $(OUT_DIR) $(OUT_PKG_DIR)
 .PHONY: clean
 
-# Generate api docs from .raml to .html.
+# Build an official release of OpenShift, including the official images.
 #
 # Example:
-#   make api
-api:
-	hack/build-api-docs-image.sh
-.PHONY: api
+#   make clean
+release: clean
+	hack/build-release.sh
+	hack/build-images.sh
+.PHONY: release

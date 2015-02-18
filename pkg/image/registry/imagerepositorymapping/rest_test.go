@@ -2,103 +2,18 @@ package imagerepositorymapping
 
 import (
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 
-	kubeapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
-	"github.com/fsouza/go-dockerclient"
+	kclient "github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 
 	"github.com/openshift/origin/pkg/image/api"
 	"github.com/openshift/origin/pkg/image/registry/test"
 )
-
-func TestGetImageRepositoryMapping(t *testing.T) {
-	imageRegistry := test.NewImageRegistry()
-	imageRepositoryRegistry := test.NewImageRepositoryRegistry()
-	storage := &REST{imageRegistry, imageRepositoryRegistry}
-
-	obj, err := storage.Get(nil, "foo")
-	if obj != nil {
-		t.Errorf("Unexpected non-nil object %#v", obj)
-	}
-	if err == nil {
-		t.Fatal("Unexpected nil err")
-	}
-	if !errors.IsNotFound(err) {
-		t.Errorf("Expected 'not found' error, got %#v", err)
-	}
-}
-
-func TestListImageRepositoryMappings(t *testing.T) {
-	imageRegistry := test.NewImageRegistry()
-	imageRepositoryRegistry := test.NewImageRepositoryRegistry()
-	storage := &REST{imageRegistry, imageRepositoryRegistry}
-
-	list, err := storage.List(nil, labels.Everything(), labels.Everything())
-	if list != nil {
-		t.Errorf("Unexpected non-nil list %#v", list)
-	}
-	if err == nil {
-		t.Fatal("Unexpected nil err")
-	}
-	if !errors.IsNotFound(err) {
-		t.Errorf("Expected 'not found' error, got %#v", err)
-	}
-}
-
-func TestDeleteImageRepositoryMapping(t *testing.T) {
-	imageRegistry := test.NewImageRegistry()
-	imageRepositoryRegistry := test.NewImageRepositoryRegistry()
-	storage := &REST{imageRegistry, imageRepositoryRegistry}
-
-	channel, err := storage.Delete(nil, "repo1")
-	if channel != nil {
-		t.Errorf("Unexpected non-nil channel %#v", channel)
-	}
-	if err == nil {
-		t.Fatal("Unexpected nil err")
-	}
-	if !errors.IsNotFound(err) {
-		t.Errorf("Expected 'not found' error, got %#v", err)
-	}
-}
-
-func TestUpdateImageRepositoryMapping(t *testing.T) {
-	imageRegistry := test.NewImageRegistry()
-	imageRepositoryRegistry := test.NewImageRepositoryRegistry()
-	storage := &REST{imageRegistry, imageRepositoryRegistry}
-
-	channel, err := storage.Update(nil, &api.ImageList{})
-	if channel != nil {
-		t.Errorf("Unexpected non-nil channel %#v", channel)
-	}
-	if err == nil {
-		t.Fatal("Unexpected nil err")
-	}
-	if strings.Index(err.Error(), "ImageRepositoryMappings may not be changed.") == -1 {
-		t.Errorf("Expected 'may not be changed' error, got %#v", err)
-	}
-}
-
-func TestCreateImageRepositoryMappingBadObject(t *testing.T) {
-	imageRegistry := test.NewImageRegistry()
-	imageRepositoryRegistry := test.NewImageRepositoryRegistry()
-	storage := &REST{imageRegistry, imageRepositoryRegistry}
-
-	channel, err := storage.Create(nil, &api.ImageList{})
-	if channel != nil {
-		t.Errorf("Unexpected non-nil channel %#v", channel)
-	}
-	if err == nil {
-		t.Fatal("Unexpected nil err")
-	}
-	if strings.Index(err.Error(), "not an image repository mapping") == -1 {
-		t.Errorf("Expected 'not an image repository mapping' error, got %#v", err)
-	}
-}
 
 func TestCreateImageRepositoryMappingFindError(t *testing.T) {
 	imageRegistry := test.NewImageRegistry()
@@ -109,17 +24,17 @@ func TestCreateImageRepositoryMappingFindError(t *testing.T) {
 	mapping := api.ImageRepositoryMapping{
 		DockerImageRepository: "localhost:5000/someproject/somerepo",
 		Image: api.Image{
-			JSONBase: kubeapi.JSONBase{
-				ID: "imageID1",
+			ObjectMeta: kapi.ObjectMeta{
+				Name: "imageID1",
 			},
 			DockerImageReference: "localhost:5000/someproject/somerepo:imageID1",
 		},
 		Tag: "latest",
 	}
 
-	channel, err := storage.Create(nil, &mapping)
-	if channel != nil {
-		t.Errorf("Unexpected non-nil channel %#v", channel)
+	obj, err := storage.Create(kapi.NewDefaultContext(), &mapping)
+	if obj != nil {
+		t.Fatalf("Unexpected non-nil obj %#v", obj)
 	}
 	if err == nil {
 		t.Fatal("Unexpected nil err")
@@ -135,8 +50,8 @@ func TestCreateImageRepositoryMappingNotFound(t *testing.T) {
 	imageRepositoryRegistry.ImageRepositories = &api.ImageRepositoryList{
 		Items: []api.ImageRepository{
 			{
-				JSONBase: kubeapi.JSONBase{
-					ID: "repo1",
+				ObjectMeta: kapi.ObjectMeta{
+					Name: "repo1",
 				},
 				DockerImageRepository: "localhost:5000/test/repo",
 			},
@@ -147,17 +62,17 @@ func TestCreateImageRepositoryMappingNotFound(t *testing.T) {
 	mapping := api.ImageRepositoryMapping{
 		DockerImageRepository: "localhost:5000/someproject/somerepo",
 		Image: api.Image{
-			JSONBase: kubeapi.JSONBase{
-				ID: "imageID1",
+			ObjectMeta: kapi.ObjectMeta{
+				Name: "imageID1",
 			},
 			DockerImageReference: "localhost:5000/someproject/somerepo:imageID1",
 		},
 		Tag: "latest",
 	}
 
-	channel, err := storage.Create(nil, &mapping)
-	if channel != nil {
-		t.Errorf("Unexpected non-nil channel %#v", channel)
+	obj, err := storage.Create(kapi.NewDefaultContext(), &mapping)
+	if obj != nil {
+		t.Errorf("Unexpected non-nil obj %#v", obj)
 	}
 	if err == nil {
 		t.Fatal("Unexpected nil err")
@@ -173,8 +88,8 @@ func TestCreateImageRepositoryMapping(t *testing.T) {
 	imageRepositoryRegistry.ImageRepositories = &api.ImageRepositoryList{
 		Items: []api.ImageRepository{
 			{
-				JSONBase: kubeapi.JSONBase{
-					ID: "repo1",
+				ObjectMeta: kapi.ObjectMeta{
+					Name: "repo1",
 				},
 				DockerImageRepository: "localhost:5000/someproject/somerepo",
 			},
@@ -185,47 +100,109 @@ func TestCreateImageRepositoryMapping(t *testing.T) {
 	mapping := api.ImageRepositoryMapping{
 		DockerImageRepository: "localhost:5000/someproject/somerepo",
 		Image: api.Image{
-			JSONBase: kubeapi.JSONBase{
-				ID: "imageID1",
+			ObjectMeta: kapi.ObjectMeta{
+				Name: "imageID1",
 			},
 			DockerImageReference: "localhost:5000/someproject/somerepo:imageID1",
-			Metadata: docker.Image{
-				Config: &docker.Config{
+			DockerImageMetadata: api.DockerImage{
+				Config: api.DockerConfig{
 					Cmd:          []string{"ls", "/"},
 					Env:          []string{"a=1"},
-					ExposedPorts: map[docker.Port]struct{}{"1234/tcp": {}},
+					ExposedPorts: map[string]struct{}{"1234/tcp": {}},
 					Memory:       1234,
-					CpuShares:    99,
+					CPUShares:    99,
 					WorkingDir:   "/workingDir",
 				},
 			},
 		},
 		Tag: "latest",
 	}
-	ch, err := storage.Create(nil, &mapping)
+	_, err := storage.Create(kapi.NewDefaultContext(), &mapping)
 	if err != nil {
 		t.Errorf("Unexpected error creating mapping: %#v", err)
 	}
 
-	out := <-ch
-	t.Logf("out = '%#v'", out)
-
-	image, err := imageRegistry.GetImage("imageID1")
+	image, err := imageRegistry.GetImage(kapi.NewDefaultContext(), "imageID1")
 	if err != nil {
 		t.Errorf("Unexpected error retrieving image: %#v", err)
 	}
 	if e, a := mapping.Image.DockerImageReference, image.DockerImageReference; e != a {
 		t.Errorf("Expected %s, got %s", e, a)
 	}
-	if !reflect.DeepEqual(mapping.Image.Metadata, image.Metadata) {
+	if !reflect.DeepEqual(mapping.Image.DockerImageMetadata, image.DockerImageMetadata) {
 		t.Errorf("Expected %#v, got %#v", mapping.Image, image)
 	}
 
-	repo, err := imageRepositoryRegistry.GetImageRepository("repo1")
+	repo, err := imageRepositoryRegistry.GetImageRepository(kapi.NewDefaultContext(), "repo1")
 	if err != nil {
 		t.Errorf("Unexpected non-nil err: %#v", err)
 	}
 	if e, a := "imageID1", repo.Tags["latest"]; e != a {
 		t.Errorf("Expected %s, got %s", e, a)
 	}
+}
+
+func TestCreateImageRepositoryConflictingNamespace(t *testing.T) {
+	imageRegistry := test.NewImageRegistry()
+	imageRepositoryRegistry := test.NewImageRepositoryRegistry()
+	imageRepositoryRegistry.ImageRepositories = &api.ImageRepositoryList{
+		Items: []api.ImageRepository{
+			{
+				ObjectMeta: kapi.ObjectMeta{
+					Name: "repo1",
+				},
+				DockerImageRepository: "localhost:5000/someproject/somerepo",
+			},
+		},
+	}
+	storage := &REST{imageRegistry, imageRepositoryRegistry}
+
+	mapping := api.ImageRepositoryMapping{
+		ObjectMeta: kapi.ObjectMeta{
+			Namespace: "some-value",
+		},
+		DockerImageRepository: "localhost:5000/someproject/somerepo",
+		Image: api.Image{
+			ObjectMeta: kapi.ObjectMeta{
+				Name: "imageID1",
+			},
+			DockerImageReference: "localhost:5000/someproject/somerepo:imageID1",
+			DockerImageMetadata: api.DockerImage{
+				Config: api.DockerConfig{
+					Cmd:          []string{"ls", "/"},
+					Env:          []string{"a=1"},
+					ExposedPorts: map[string]struct{}{"1234/tcp": {}},
+					Memory:       1234,
+					CPUShares:    99,
+					WorkingDir:   "/workingDir",
+				},
+			},
+		},
+		Tag: "latest",
+	}
+
+	ch, err := storage.Create(kapi.WithNamespace(kapi.NewContext(), "legal-name"), &mapping)
+	if ch != nil {
+		t.Error("Expected a nil obj, but we got a value")
+	}
+	checkExpectedNamespaceError(t, err)
+}
+
+func checkExpectedNamespaceError(t *testing.T, err error) {
+	expectedError := "ImageRepositoryMapping.Namespace does not match the provided context"
+	if err == nil {
+		t.Errorf("Expected '" + expectedError + "', but we didn't get one")
+	} else {
+		e, ok := err.(kclient.APIStatus)
+		if !ok {
+			t.Errorf("error was not a statusError: %v", err)
+		}
+		if e.Status().Code != http.StatusConflict {
+			t.Errorf("Unexpected failure status: %v", e.Status())
+		}
+		if strings.Index(err.Error(), expectedError) == -1 {
+			t.Errorf("Expected '"+expectedError+"' error, got '%v'", err.Error())
+		}
+	}
+
 }

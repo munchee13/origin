@@ -7,49 +7,121 @@ import (
 
 	"testing"
 
-	kubeapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
+	"github.com/golang/glog"
 
 	"github.com/openshift/origin/pkg/api/latest"
-	buildapi "github.com/openshift/origin/pkg/build/api"
+	"github.com/openshift/origin/pkg/api/validation"
 	configapi "github.com/openshift/origin/pkg/config/api"
+	deployapi "github.com/openshift/origin/pkg/deploy/api"
+	imageapi "github.com/openshift/origin/pkg/image/api"
+	projectapi "github.com/openshift/origin/pkg/project/api"
+	routeapi "github.com/openshift/origin/pkg/route/api"
 	templateapi "github.com/openshift/origin/pkg/template/api"
 )
 
-func TestExamples(t *testing.T) {
-	expected := map[string]runtime.Object{
-		"guestbook/template.json":                              &templateapi.Template{},
-		"hello-openshift/hello-pod.json":                       &kubeapi.Pod{},
-		"simple-ruby-app/buildcfg/buildcfg.json":               &buildapi.BuildConfig{},
-		"simple-ruby-app/buildinvoke/pushevent.json":           nil, // Skip.
-		"simple-ruby-app/registry_config/registry_config.json": &configapi.Config{},
-		"simple-ruby-app/template/template.json":               &templateapi.Template{},
-	}
+type mockService struct{}
 
-	files := []string{}
-	err := filepath.Walk(".", func(path string, f os.FileInfo, err error) error {
-		if filepath.Ext(path) == ".json" {
-			files = append(files, path)
+func (mockService) ListServices(kapi.Context) (*kapi.ServiceList, error) {
+	return &kapi.ServiceList{}, nil
+}
+
+func walkJSONFiles(inDir string, fn func(name, path string, data []byte)) error {
+	err := filepath.Walk(inDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
 		}
-		return err
+		if info.IsDir() && path != inDir {
+			return filepath.SkipDir
+		}
+		name := filepath.Base(path)
+		ext := filepath.Ext(name)
+		if ext != "" {
+			name = name[:len(name)-len(ext)]
+		}
+		if !(ext == ".json" || ext == ".yaml") {
+			return nil
+		}
+		glog.Infof("testing %s", path)
+		data, err := ioutil.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fn(name, path, data)
+		return nil
 	})
-	if err != nil {
-		t.Errorf("%v", err)
+	return err
+}
+
+func TestExampleObjectSchemas(t *testing.T) {
+	// Allow privileged containers
+	// TODO: make this configurable and not the default https://github.com/openshift/origin/issues/662
+	kubelet.SetupCapabilities(true)
+	cases := map[string]map[string]runtime.Object{
+		"../examples/hello-openshift": {
+			"hello-pod":     &kapi.Pod{},
+			"hello-project": &projectapi.Project{},
+		},
+		"../examples/sample-app": {
+			"github-webhook-example":           nil, // Skip.
+			"docker-registry-config":           &configapi.Config{},
+			"docker-registry-template":         &templateapi.Template{},
+			"application-template-stibuild":    &templateapi.Template{},
+			"application-template-dockerbuild": &templateapi.Template{},
+			"application-template-custombuild": &templateapi.Template{},
+			"project":                          &projectapi.Project{},
+		},
+		"../examples/jenkins": {
+			"jenkins-config":         &configapi.Config{},
+			"docker-registry-config": &configapi.Config{},
+			"application-template":   &templateapi.Template{},
+		},
+		"../examples/image-repositories": {
+			"image-repositories": &imageapi.ImageRepositoryList{},
+		},
+		"../test/integration/fixtures": {
+			"test-deployment-config": &deployapi.DeploymentConfig{},
+			"test-image-repository":  &imageapi.ImageRepository{},
+			"test-image":             &imageapi.Image{},
+			"test-mapping":           &imageapi.ImageRepositoryMapping{},
+			"test-route":             &routeapi.Route{},
+			"test-service":           &kapi.Service{},
+			"test-buildcli":          &kapi.List{},
+		},
+		"../test/templates/fixtures": {
+			"crunchydata-pod": nil, // Explicitly fails validation, but should pass transformation
+			"guestbook":       &templateapi.Template{},
+		},
 	}
 
-	for _, file := range files {
-		expectedObject, ok := expected[file]
-		if !ok {
-			t.Errorf("No test case defined for example JSON file '%v'", file)
-			continue
+	for path, expected := range cases {
+		tested := 0
+		err := walkJSONFiles(path, func(name, path string, data []byte) {
+			expectedType, found := expected[name]
+			if !found {
+				t.Errorf("%s does not have a test case defined", path)
+				return
+			}
+			tested += 1
+			if expectedType == nil {
+				t.Logf("%q is skipped", path)
+				return
+			}
+			if err := latest.Codec.DecodeInto(data, expectedType); err != nil {
+				t.Errorf("%s did not decode correctly: %v\n%s", path, err, string(data))
+				return
+			}
+			if errors := validation.ValidateObject(expectedType); len(errors) > 0 {
+				t.Errorf("%s did not validate correctly: %v", path, errors)
+			}
+		})
+		if err != nil {
+			t.Errorf("Expected no error, Got %v", err)
 		}
-		if expectedObject == nil {
-			continue
-		}
-
-		jsonData, _ := ioutil.ReadFile(file)
-		if err := latest.Codec.DecodeInto(jsonData, expectedObject); err != nil {
-			t.Errorf("Unexpected error while decoding example JSON file '%v': %v", file, err)
+		if tested != len(expected) {
+			t.Errorf("Expected %d examples, Got %d", len(expected), tested)
 		}
 	}
 }

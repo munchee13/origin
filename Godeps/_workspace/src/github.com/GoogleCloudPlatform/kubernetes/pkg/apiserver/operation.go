@@ -17,56 +17,21 @@ limitations under the License.
 package apiserver
 
 import (
-	"net/http"
-	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 )
-
-type OperationHandler struct {
-	ops   *Operations
-	codec runtime.Codec
-}
-
-func (h *OperationHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	parts := splitPath(req.URL.Path)
-	if len(parts) > 1 || req.Method != "GET" {
-		notFound(w, req)
-		return
-	}
-	if len(parts) == 0 {
-		// List outstanding operations.
-		list := h.ops.List()
-		writeJSON(http.StatusOK, h.codec, list, w)
-		return
-	}
-
-	op := h.ops.Get(parts[0])
-	if op == nil {
-		notFound(w, req)
-		return
-	}
-
-	obj, complete := op.StatusOrResult()
-	if complete {
-		writeJSON(http.StatusOK, h.codec, obj, w)
-	} else {
-		writeJSON(http.StatusAccepted, h.codec, obj, w)
-	}
-}
 
 // Operation represents an ongoing action which the server is performing.
 type Operation struct {
 	ID        string
-	result    runtime.Object
-	onReceive func(runtime.Object)
-	awaiting  <-chan runtime.Object
+	result    RESTResult
+	onReceive func(RESTResult)
+	awaiting  <-chan RESTResult
 	finished  *time.Time
 	lock      sync.Mutex
 	notify    chan struct{}
@@ -93,7 +58,7 @@ func NewOperations() *Operations {
 
 // NewOperation adds a new operation. It is lock-free. 'onReceive' will be called
 // with the value read from 'from', when it is read.
-func (ops *Operations) NewOperation(from <-chan runtime.Object, onReceive func(runtime.Object)) *Operation {
+func (ops *Operations) NewOperation(from <-chan RESTResult, onReceive func(RESTResult)) *Operation {
 	id := atomic.AddInt64(&ops.lastID, 1)
 	op := &Operation{
 		ID:        strconv.FormatInt(id, 10),
@@ -111,23 +76,6 @@ func (ops *Operations) insert(op *Operation) {
 	ops.lock.Lock()
 	defer ops.lock.Unlock()
 	ops.ops[op.ID] = op
-}
-
-// List lists operations for an API client.
-func (ops *Operations) List() *api.ServerOpList {
-	ops.lock.Lock()
-	defer ops.lock.Unlock()
-
-	ids := []string{}
-	for id := range ops.ops {
-		ids = append(ids, id)
-	}
-	sort.StringSlice(ids).Sort()
-	ol := &api.ServerOpList{}
-	for _, id := range ids {
-		ol.Items = append(ol.Items, api.ServerOp{JSONBase: api.JSONBase{ID: id}})
-	}
-	return ol
 }
 
 // Get returns the operation with the given ID, or nil.
@@ -192,16 +140,15 @@ func (op *Operation) expired(limitTime time.Time) bool {
 
 // StatusOrResult returns status information or the result of the operation if it is complete,
 // with a bool indicating true in the latter case.
-func (op *Operation) StatusOrResult() (description runtime.Object, finished bool) {
+func (op *Operation) StatusOrResult() (description RESTResult, finished bool) {
 	op.lock.Lock()
 	defer op.lock.Unlock()
 
 	if op.finished == nil {
-		return &api.Status{
-			Status:  api.StatusWorking,
-			Reason:  api.StatusReasonWorking,
-			Details: &api.StatusDetails{ID: op.ID, Kind: "operation"},
-		}, false
+		return RESTResult{Object: &api.Status{
+			Status: api.StatusFailure,
+			Reason: api.StatusReasonTimeout,
+		}}, false
 	}
 	return op.result, true
 }

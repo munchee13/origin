@@ -1,15 +1,5 @@
 package client
 
-import (
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
-
-	buildapi "github.com/openshift/origin/pkg/build/api"
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
-	imageapi "github.com/openshift/origin/pkg/image/api"
-	routeapi "github.com/openshift/origin/pkg/route/api"
-)
-
 type FakeAction struct {
 	Action string
 	Value  interface{}
@@ -22,172 +12,78 @@ type Fake struct {
 	Actions []FakeAction
 }
 
-func (c *Fake) CreateBuild(build *buildapi.Build) (*buildapi.Build, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "create-build"})
-	return &buildapi.Build{}, nil
+func (c *Fake) Builds(namespace string) BuildInterface {
+	return &FakeBuilds{Fake: c, Namespace: namespace}
 }
 
-func (c *Fake) ListBuilds(selector labels.Selector) (*buildapi.BuildList, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "list-builds"})
-	return &buildapi.BuildList{}, nil
+func (c *Fake) BuildConfigs(namespace string) BuildConfigInterface {
+	return &FakeBuildConfigs{Fake: c, Namespace: namespace}
 }
 
-func (c *Fake) UpdateBuild(build *buildapi.Build) (*buildapi.Build, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "update-build"})
-	return &buildapi.Build{}, nil
+func (c *Fake) Images(namespace string) ImageInterface {
+	return &FakeImages{Fake: c, Namespace: namespace}
 }
 
-func (c *Fake) DeleteBuild(id string) error {
-	c.Actions = append(c.Actions, FakeAction{Action: "delete-build", Value: id})
-	return nil
+func (c *Fake) ImageRepositories(namespace string) ImageRepositoryInterface {
+	return &FakeImageRepositories{Fake: c, Namespace: namespace}
 }
 
-func (c *Fake) CreateBuildConfig(config *buildapi.BuildConfig) (*buildapi.BuildConfig, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "create-buildconfig"})
-	return &buildapi.BuildConfig{}, nil
+func (c *Fake) ImageRepositoryMappings(namespace string) ImageRepositoryMappingInterface {
+	return &FakeImageRepositoryMappings{Fake: c, Namespace: namespace}
 }
 
-func (c *Fake) ListBuildConfigs(selector labels.Selector) (*buildapi.BuildConfigList, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "list-buildconfig"})
-	return &buildapi.BuildConfigList{}, nil
+func (c *Fake) ImageRepositoryTags(namespace string) ImageRepositoryTagInterface {
+	return &FakeImageRepositoryTags{Fake: c, Namespace: namespace}
 }
 
-func (c *Fake) GetBuildConfig(id string) (*buildapi.BuildConfig, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "get-buildconfig", Value: id})
-	return &buildapi.BuildConfig{}, nil
+func (c *Fake) Deployments(namespace string) DeploymentInterface {
+	return &FakeDeployments{Fake: c, Namespace: namespace}
 }
 
-func (c *Fake) UpdateBuildConfig(config *buildapi.BuildConfig) (*buildapi.BuildConfig, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "update-buildconfig"})
-	return &buildapi.BuildConfig{}, nil
+func (c *Fake) DeploymentConfigs(namespace string) DeploymentConfigInterface {
+	return &FakeDeploymentConfigs{Fake: c, Namespace: namespace}
 }
 
-func (c *Fake) DeleteBuildConfig(id string) error {
-	c.Actions = append(c.Actions, FakeAction{Action: "delete-buildconfig", Value: id})
-	return nil
+func (c *Fake) Routes(namespace string) RouteInterface {
+	return &FakeRoutes{Fake: c, Namespace: namespace}
 }
 
-func (c *Fake) ListImages(selector labels.Selector) (*imageapi.ImageList, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "list-images"})
-	return &imageapi.ImageList{}, nil
+func (c *Fake) Templates(namespace string) TemplateInterface {
+	return &FakeTemplates{Fake: c}
 }
 
-func (c *Fake) GetImage(id string) (*imageapi.Image, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "get-image", Value: id})
-	return &imageapi.Image{}, nil
+func (c *Fake) Users() UserInterface {
+	return &FakeUsers{Fake: c}
 }
 
-func (c *Fake) CreateImage(image *imageapi.Image) (*imageapi.Image, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "create-image"})
-	return &imageapi.Image{}, nil
+func (c *Fake) UserIdentityMappings() UserIdentityMappingInterface {
+	return &FakeUserIdentityMappings{Fake: c}
 }
 
-func (c *Fake) ListImageRepositories(selector labels.Selector) (*imageapi.ImageRepositoryList, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "list-imagerepositries"})
-	return &imageapi.ImageRepositoryList{}, nil
+func (c *Fake) Projects() ProjectInterface {
+	return &FakeProjects{Fake: c}
 }
 
-func (c *Fake) GetImageRepository(id string) (*imageapi.ImageRepository, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "get-imagerepository", Value: id})
-	return &imageapi.ImageRepository{}, nil
+func (c *Fake) Policies(namespace string) PolicyInterface {
+	return &FakePolicies{Fake: c}
 }
 
-func (c *Fake) WatchImageRepositories(field, label labels.Selector, resourceVersion uint64) (watch.Interface, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "watch-imagerepositories"})
-	return nil, nil
+func (c *Fake) Roles(namespace string) RoleInterface {
+	return &FakeRoles{Fake: c}
 }
 
-func (c *Fake) CreateImageRepository(repo *imageapi.ImageRepository) (*imageapi.ImageRepository, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "create-imagerepository"})
-	return &imageapi.ImageRepository{}, nil
+func (c *Fake) RoleBindings(namespace string) RoleBindingInterface {
+	return &FakeRoleBindings{Fake: c}
 }
 
-func (c *Fake) UpdateImageRepository(repo *imageapi.ImageRepository) (*imageapi.ImageRepository, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "update-imagerepository"})
-	return &imageapi.ImageRepository{}, nil
+func (c *Fake) PolicyBindings(namespace string) PolicyBindingInterface {
+	return &FakePolicyBindings{Fake: c}
 }
 
-func (c *Fake) CreateImageRepositoryMapping(mapping *imageapi.ImageRepositoryMapping) error {
-	c.Actions = append(c.Actions, FakeAction{Action: "create-imagerepository-mapping"})
-	return nil
+func (c *Fake) ResourceAccessReviews(namespace string) ResourceAccessReviewInterface {
+	return &FakeResourceAccessReviews{Fake: c}
 }
 
-func (c *Fake) ListDeploymentConfigs(selector labels.Selector) (*deployapi.DeploymentConfigList, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "list-deploymentconfig"})
-	return &deployapi.DeploymentConfigList{}, nil
-}
-
-func (c *Fake) GetDeploymentConfig(id string) (*deployapi.DeploymentConfig, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "get-deploymentconfig"})
-	return &deployapi.DeploymentConfig{}, nil
-}
-
-func (c *Fake) CreateDeploymentConfig(config *deployapi.DeploymentConfig) (*deployapi.DeploymentConfig, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "create-deploymentconfig"})
-	return &deployapi.DeploymentConfig{}, nil
-}
-
-func (c *Fake) UpdateDeploymentConfig(config *deployapi.DeploymentConfig) (*deployapi.DeploymentConfig, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "update-deploymentconfig"})
-	return &deployapi.DeploymentConfig{}, nil
-}
-
-func (c *Fake) DeleteDeploymentConfig(id string) error {
-	c.Actions = append(c.Actions, FakeAction{Action: "delete-deploymentconfig"})
-	return nil
-}
-
-func (c *Fake) ListDeployments(selector labels.Selector) (*deployapi.DeploymentList, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "list-deployment"})
-	return &deployapi.DeploymentList{}, nil
-}
-
-func (c *Fake) GetDeployment(id string) (*deployapi.Deployment, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "get-deployment"})
-	return &deployapi.Deployment{}, nil
-}
-
-func (c *Fake) CreateDeployment(deployment *deployapi.Deployment) (*deployapi.Deployment, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "create-deployment"})
-	return &deployapi.Deployment{}, nil
-}
-
-func (c *Fake) UpdateDeployment(deployment *deployapi.Deployment) (*deployapi.Deployment, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "update-deployment"})
-	return &deployapi.Deployment{}, nil
-}
-
-func (c *Fake) DeleteDeployment(id string) error {
-	c.Actions = append(c.Actions, FakeAction{Action: "delete-deployment"})
-	return nil
-}
-
-func (c *Fake) ListRoutes(selector labels.Selector) (*routeapi.RouteList, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "list-routes"})
-	return &routeapi.RouteList{}, nil
-}
-
-func (c *Fake) GetRoute(id string) (*routeapi.Route, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "get-route"})
-	return &routeapi.Route{}, nil
-}
-
-func (c *Fake) CreateRoute(route *routeapi.Route) (*routeapi.Route, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "create-route"})
-	return &routeapi.Route{}, nil
-}
-
-func (c *Fake) UpdateRoute(route *routeapi.Route) (*routeapi.Route, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "update-route"})
-	return &routeapi.Route{}, nil
-}
-
-func (c *Fake) DeleteRoute(id string) error {
-	c.Actions = append(c.Actions, FakeAction{Action: "delete-route"})
-	return nil
-}
-
-func (c *Fake) WatchRoutes(field, label labels.Selector, resourceVersion uint64) (watch.Interface, error) {
-	c.Actions = append(c.Actions, FakeAction{Action: "watch-routes"})
-	return nil, nil
+func (c *Fake) SubjectAccessReviews(namespace string) SubjectAccessReviewInterface {
+	return &FakeSubjectAccessReviews{Fake: c}
 }

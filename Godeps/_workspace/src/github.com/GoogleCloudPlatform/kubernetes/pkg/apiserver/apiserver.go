@@ -17,20 +17,73 @@ limitations under the License.
 package apiserver
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"net/http"
+	"path"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/admission"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/version"
+
+	"github.com/emicklei/go-restful"
 	"github.com/golang/glog"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
+var (
+	// TODO(a-robinson): Add unit tests for the handling of these metrics once
+	// the upstream library supports it.
+	requestCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "apiserver_request_count",
+			Help: "Counter of apiserver requests broken out for each request handler, verb, API resource, and HTTP response code.",
+		},
+		[]string{"handler", "verb", "resource", "code"},
+	)
+	requestLatencies = prometheus.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Name: "apiserver_request_latencies",
+			Help: "Response latency summary in microseconds for each request handler and verb.",
+		},
+		[]string{"handler", "verb"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(requestCounter)
+	prometheus.MustRegister(requestLatencies)
+}
+
+// monitor is a helper function for each HTTP request handler to use for
+// instrumenting basic request counter and latency metrics.
+func monitor(handler, verb, resource string, httpCode int, reqStart time.Time) {
+	requestCounter.WithLabelValues(handler, verb, resource, strconv.Itoa(httpCode)).Inc()
+	requestLatencies.WithLabelValues(handler, verb).Observe(float64((time.Since(reqStart)) / time.Microsecond))
+}
+
+// monitorFilter creates a filter that reports the metrics for a given resource and action.
+func monitorFilter(action, resource string) restful.FilterFunction {
+	return func(req *restful.Request, res *restful.Response, chain *restful.FilterChain) {
+		reqStart := time.Now()
+		chain.ProcessFilter(req, res)
+		monitor("rest", action, resource, res.StatusCode(), reqStart)
+	}
+}
+
 // mux is an object that can register http handlers.
-type mux interface {
+type Mux interface {
 	Handle(pattern string, handler http.Handler)
 	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
 }
@@ -38,121 +91,188 @@ type mux interface {
 // defaultAPIServer exposes nested objects for testability.
 type defaultAPIServer struct {
 	http.Handler
-	group *APIGroup
+	group *APIGroupVersion
 }
-
-const (
-	StatusUnprocessableEntity = 422
-)
 
 // Handle returns a Handler function that exposes the provided storage interfaces
 // as RESTful resources at prefix, serialized by codec, and also includes the support
 // http resources.
-func Handle(storage map[string]RESTStorage, codec runtime.Codec, prefix string, selfLinker runtime.SelfLinker) http.Handler {
-	group := NewAPIGroup(storage, codec, prefix, selfLinker)
-
-	mux := http.NewServeMux()
-	group.InstallREST(mux, prefix)
-	InstallSupport(mux)
+// Note: This method is used only in tests.
+func Handle(storage map[string]RESTStorage, codec runtime.Codec, root string, version string, linker runtime.SelfLinker, admissionControl admission.Interface, contextMapper api.RequestContextMapper, mapper meta.RESTMapper) http.Handler {
+	prefix := path.Join(root, version)
+	group := NewAPIGroupVersion(storage, codec, root, prefix, linker, admissionControl, contextMapper, mapper)
+	container := restful.NewContainer()
+	container.Router(restful.CurlyRouter{})
+	mux := container.ServeMux
+	group.InstallREST(container, root, version)
+	ws := new(restful.WebService)
+	InstallSupport(mux, ws)
+	container.Add(ws)
 	return &defaultAPIServer{mux, group}
 }
 
-// APIGroup is a http.Handler that exposes multiple RESTStorage objects
+// APIGroupVersion is a helper for exposing RESTStorage objects as http.Handlers via go-restful
 // It handles URLs of the form:
 // /${storage_key}[/${object_name}]
 // Where 'storage_key' points to a RESTStorage object stored in storage.
-//
-// TODO: consider migrating this to go-restful which is a more full-featured version of the same thing.
-type APIGroup struct {
-	handler RESTHandler
+type APIGroupVersion struct {
+	storage map[string]RESTStorage
+	codec   runtime.Codec
+	prefix  string
+	linker  runtime.SelfLinker
+	admit   admission.Interface
+	context api.RequestContextMapper
+	mapper  meta.RESTMapper
+	// TODO: put me into a cleaner interface
+	info *APIRequestInfoResolver
 }
 
-// NewAPIGroup returns an object that will serve a set of REST resources and their
+// NewAPIGroupVersion returns an object that will serve a set of REST resources and their
 // associated operations.  The provided codec controls serialization and deserialization.
 // This is a helper method for registering multiple sets of REST handlers under different
 // prefixes onto a server.
 // TODO: add multitype codec serialization
-func NewAPIGroup(storage map[string]RESTStorage, codec runtime.Codec, canonicalPrefix string, selfLinker runtime.SelfLinker) *APIGroup {
-	return &APIGroup{RESTHandler{
-		storage:         storage,
-		codec:           codec,
-		canonicalPrefix: canonicalPrefix,
-		selfLinker:      selfLinker,
-		ops:             NewOperations(),
-		// Delay just long enough to handle most simple write operations
-		asyncOpWait: time.Millisecond * 25,
-	}}
+func NewAPIGroupVersion(storage map[string]RESTStorage, codec runtime.Codec, root, prefix string, linker runtime.SelfLinker, admissionControl admission.Interface, contextMapper api.RequestContextMapper, mapper meta.RESTMapper) *APIGroupVersion {
+	return &APIGroupVersion{
+		storage: storage,
+		codec:   codec,
+		prefix:  prefix,
+		linker:  linker,
+		admit:   admissionControl,
+		context: contextMapper,
+		mapper:  mapper,
+		info:    &APIRequestInfoResolver{util.NewStringSet(root), latest.RESTMapper},
+	}
 }
 
-// InstallREST registers the REST handlers (storage, watch, and operations) into a mux.
-// It is expected that the provided prefix will serve all operations. Path MUST NOT end
-// in a slash.
-func (g *APIGroup) InstallREST(mux mux, paths ...string) {
-	restHandler := &g.handler
-	watchHandler := &WatchHandler{g.handler.storage, g.handler.codec}
-	redirectHandler := &RedirectHandler{g.handler.storage, g.handler.codec}
-	opHandler := &OperationHandler{g.handler.ops, g.handler.codec}
-
-	servers := map[string]string{
-		"controller-manager": "127.0.0.1:10252",
-		"scheduler":          "127.0.0.1:10251",
-		// TODO: Add minion health checks here too.
+// InstallREST registers the REST handlers (storage, watch, proxy and redirect) into a restful Container.
+// It is expected that the provided path root prefix will serve all operations. Root MUST NOT end
+// in a slash. A restful WebService is created for the group and version.
+func (g *APIGroupVersion) InstallREST(container *restful.Container, root string, version string) error {
+	prefix := path.Join(root, version)
+	installer := &APIInstaller{
+		group:   g,
+		prefix:  prefix,
+		version: version,
 	}
+	ws, registrationErrors := installer.Install()
+	container.Add(ws)
+	return errors.NewAggregate(registrationErrors)
+}
+
+// TODO: Convert to go-restful
+func InstallValidator(mux Mux, servers func() map[string]Server) {
 	validator, err := NewValidator(servers)
 	if err != nil {
 		glog.Errorf("failed to set up validator: %v", err)
-		validator = nil
+		return
 	}
-	for _, prefix := range paths {
-		prefix = strings.TrimRight(prefix, "/")
-		proxyHandler := &ProxyHandler{prefix + "/proxy/", g.handler.storage, g.handler.codec}
-		mux.Handle(prefix+"/", http.StripPrefix(prefix, restHandler))
-		mux.Handle(prefix+"/watch/", http.StripPrefix(prefix+"/watch/", watchHandler))
-		mux.Handle(prefix+"/proxy/", http.StripPrefix(prefix+"/proxy/", proxyHandler))
-		mux.Handle(prefix+"/redirect/", http.StripPrefix(prefix+"/redirect/", redirectHandler))
-		mux.Handle(prefix+"/operations", http.StripPrefix(prefix+"/operations", opHandler))
-		mux.Handle(prefix+"/operations/", http.StripPrefix(prefix+"/operations/", opHandler))
-		if validator != nil {
-			mux.Handle(prefix+"/validate", validator)
-		}
+	if validator != nil {
+		mux.Handle("/validate", validator)
 	}
 }
 
-// InstallSupport registers the APIServer support functions into a mux.
-func InstallSupport(mux mux) {
+// TODO: document all handlers
+// InstallSupport registers the APIServer support functions
+func InstallSupport(mux Mux, ws *restful.WebService) {
+	// TODO: convert healthz and metrics to restful and remove container arg
 	healthz.InstallHandler(mux)
+	mux.Handle("/metrics", prometheus.Handler())
+
+	// Set up a service to return the git code version.
+	ws.Path("/version")
+	ws.Doc("git code version from which this is built")
+	ws.Route(
+		ws.GET("/").To(handleVersion).
+			Doc("get the code version").
+			Operation("getCodeVersion").
+			Produces(restful.MIME_JSON).
+			Consumes(restful.MIME_JSON))
+}
+
+// InstallLogsSupport registers the APIServer log support function into a mux.
+func InstallLogsSupport(mux Mux) {
+	// TODO: use restful: ws.Route(ws.GET("/logs/{logpath:*}").To(fileHandler))
+	// See github.com/emicklei/go-restful/blob/master/examples/restful-serve-static.go
 	mux.Handle("/logs/", http.StripPrefix("/logs/", http.FileServer(http.Dir("/var/log/"))))
-	mux.Handle("/proxy/minion/", http.StripPrefix("/proxy/minion", http.HandlerFunc(handleProxyMinion)))
-	mux.HandleFunc("/version", handleVersion)
-	mux.HandleFunc("/", handleIndex)
+}
+
+// Adds a service to return the supported api versions.
+func AddApiWebService(container *restful.Container, apiPrefix string, versions []string) {
+	// TODO: InstallREST should register each version automatically
+
+	versionHandler := APIVersionHandler(versions[:]...)
+	ws := new(restful.WebService)
+	ws.Path(apiPrefix)
+	ws.Doc("get available API versions")
+	ws.Route(ws.GET("/").To(versionHandler).
+		Doc("get available API versions").
+		Operation("getAPIVersions").
+		Produces(restful.MIME_JSON).
+		Consumes(restful.MIME_JSON))
+	container.Add(ws)
 }
 
 // handleVersion writes the server's version information.
-func handleVersion(w http.ResponseWriter, req *http.Request) {
-	writeRawJSON(http.StatusOK, version.Get(), w)
+func handleVersion(req *restful.Request, resp *restful.Response) {
+	// TODO: use restful's Response methods
+	writeRawJSON(http.StatusOK, version.Get(), resp.ResponseWriter)
+}
+
+// APIVersionHandler returns a handler which will list the provided versions as available.
+func APIVersionHandler(versions ...string) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		// TODO: use restful's Response methods
+		writeRawJSON(http.StatusOK, api.APIVersions{Versions: versions}, resp.ResponseWriter)
+	}
 }
 
 // writeJSON renders an object as JSON to the response.
 func writeJSON(statusCode int, codec runtime.Codec, object runtime.Object, w http.ResponseWriter) {
 	output, err := codec.Encode(object)
 	if err != nil {
-		errorJSON(err, codec, w)
+		errorJSONFatal(err, codec, w)
+		return
+	}
+	// PR #2243: Pretty-print JSON by default.
+	formatted := &bytes.Buffer{}
+	err = json.Indent(formatted, output, "", "  ")
+	if err != nil {
+		errorJSONFatal(err, codec, w)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	w.Write(output)
+	w.Write(formatted.Bytes())
 }
 
-// errorJSON renders an error to the response.
-func errorJSON(err error, codec runtime.Codec, w http.ResponseWriter) {
+// errorJSON renders an error to the response. Returns the HTTP status code of the error.
+func errorJSON(err error, codec runtime.Codec, w http.ResponseWriter) int {
 	status := errToAPIStatus(err)
 	writeJSON(status.Code, codec, status, w)
+	return status.Code
+}
+
+// errorJSONFatal renders an error to the response, and if codec fails will render plaintext.
+// Returns the HTTP status code of the error.
+func errorJSONFatal(err error, codec runtime.Codec, w http.ResponseWriter) int {
+	util.HandleError(fmt.Errorf("apiserver was unable to write a JSON response: %v", err))
+	status := errToAPIStatus(err)
+	output, err := codec.Encode(status)
+	if err != nil {
+		w.WriteHeader(status.Code)
+		fmt.Fprintf(w, "%s: %s", status.Reason, status.Message)
+		return status.Code
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status.Code)
+	w.Write(output)
+	return status.Code
 }
 
 // writeRawJSON writes a non-API object in JSON.
 func writeRawJSON(statusCode int, object interface{}, w http.ResponseWriter) {
-	output, err := json.Marshal(object)
+	output, err := json.MarshalIndent(object, "", "  ")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -168,7 +288,7 @@ func parseTimeout(str string) time.Duration {
 		if err == nil {
 			return timeout
 		}
-		glog.Errorf("Failed to parse: %#v '%s'", err, str)
+		glog.Errorf("Failed to parse %q: %v", str, err)
 	}
 	return 30 * time.Second
 }

@@ -27,22 +27,24 @@ import (
 )
 
 func TestServices(t *testing.T) {
-	service := api.Service{JSONBase: api.JSONBase{ID: "bar", ResourceVersion: uint64(2)}}
+	service := api.Service{ObjectMeta: api.ObjectMeta{Name: "bar", ResourceVersion: "2"}}
 
 	fakeWatch := watch.NewFake()
 	fakeClient := &client.Fake{Watch: fakeWatch}
 	services := make(chan ServiceUpdate)
-	source := SourceAPI{client: fakeClient, services: services}
-	resourceVersion := uint64(1)
+	source := SourceAPI{
+		s: servicesReflector{watcher: fakeClient.Services(api.NamespaceAll), services: services},
+		e: endpointsReflector{watcher: fakeClient.Endpoints(api.NamespaceAll)}}
+	resourceVersion := "1"
 	go func() {
 		// called twice
-		source.runServices(&resourceVersion)
-		source.runServices(&resourceVersion)
+		source.s.run(&resourceVersion)
+		source.s.run(&resourceVersion)
 	}()
 
 	// test adding a service to the watch
 	fakeWatch.Add(&service)
-	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-services", uint64(1)}}) {
+	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-services", "1"}}) {
 		t.Errorf("expected call to watch-services, got %#v", fakeClient)
 	}
 
@@ -66,29 +68,31 @@ func TestServices(t *testing.T) {
 	fakeWatch.Stop()
 
 	newFakeWatch.Add(&service)
-	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-services", uint64(1)}, {"watch-services", uint64(3)}}) {
+	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-services", "1"}, {"watch-services", "2"}}) {
 		t.Errorf("expected call to watch-endpoints, got %#v", fakeClient)
 	}
 }
 
 func TestServicesFromZero(t *testing.T) {
-	service := api.Service{JSONBase: api.JSONBase{ID: "bar", ResourceVersion: uint64(2)}}
+	service := api.Service{ObjectMeta: api.ObjectMeta{Name: "bar", ResourceVersion: "2"}}
 
 	fakeWatch := watch.NewFake()
 	fakeWatch.Stop()
 	fakeClient := &client.Fake{Watch: fakeWatch}
 	fakeClient.ServiceList = api.ServiceList{
-		JSONBase: api.JSONBase{ResourceVersion: 2},
+		ListMeta: api.ListMeta{ResourceVersion: "2"},
 		Items: []api.Service{
 			service,
 		},
 	}
 	services := make(chan ServiceUpdate)
-	source := SourceAPI{client: fakeClient, services: services}
-	resourceVersion := uint64(0)
+	source := SourceAPI{
+		s: servicesReflector{watcher: fakeClient.Services(api.NamespaceAll), services: services},
+		e: endpointsReflector{watcher: fakeClient.Endpoints(api.NamespaceAll)}}
+	resourceVersion := ""
 	ch := make(chan struct{})
 	go func() {
-		source.runServices(&resourceVersion)
+		source.s.run(&resourceVersion)
 		close(ch)
 	}()
 
@@ -101,10 +105,10 @@ func TestServicesFromZero(t *testing.T) {
 
 	// should have listed, then watched
 	<-ch
-	if resourceVersion != 2 {
+	if resourceVersion != "2" {
 		t.Errorf("unexpected resource version, got %#v", resourceVersion)
 	}
-	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"list-services", nil}, {"watch-services", uint64(2)}}) {
+	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"list-services", nil}, {"watch-services", "2"}}) {
 		t.Errorf("unexpected actions, got %#v", fakeClient)
 	}
 }
@@ -112,20 +116,45 @@ func TestServicesFromZero(t *testing.T) {
 func TestServicesError(t *testing.T) {
 	fakeClient := &client.Fake{Err: errors.New("test")}
 	services := make(chan ServiceUpdate)
-	source := SourceAPI{client: fakeClient, services: services}
-	resourceVersion := uint64(1)
+	source := SourceAPI{
+		s: servicesReflector{watcher: fakeClient.Services(api.NamespaceAll), services: services},
+		e: endpointsReflector{watcher: fakeClient.Endpoints(api.NamespaceAll)}}
+	resourceVersion := "1"
 	ch := make(chan struct{})
 	go func() {
-		source.runServices(&resourceVersion)
+		source.s.run(&resourceVersion)
 		close(ch)
 	}()
 
 	// should have listed only
 	<-ch
-	if resourceVersion != 1 {
+	if resourceVersion != "" {
 		t.Errorf("unexpected resource version, got %#v", resourceVersion)
 	}
-	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-services", uint64(1)}}) {
+	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-services", "1"}}) {
+		t.Errorf("unexpected actions, got %#v", fakeClient)
+	}
+}
+
+func TestServicesErrorTimeout(t *testing.T) {
+	fakeClient := &client.Fake{Err: errors.New("use of closed network connection")}
+	services := make(chan ServiceUpdate)
+	source := SourceAPI{
+		s: servicesReflector{watcher: fakeClient.Services(api.NamespaceAll), services: services},
+		e: endpointsReflector{watcher: fakeClient.Endpoints(api.NamespaceAll)}}
+	resourceVersion := "1"
+	ch := make(chan struct{})
+	go func() {
+		source.s.run(&resourceVersion)
+		close(ch)
+	}()
+
+	// should have listed only
+	<-ch
+	if resourceVersion != "1" {
+		t.Errorf("unexpected resource version, got %#v", resourceVersion)
+	}
+	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-services", "1"}}) {
 		t.Errorf("unexpected actions, got %#v", fakeClient)
 	}
 }
@@ -133,17 +162,19 @@ func TestServicesError(t *testing.T) {
 func TestServicesFromZeroError(t *testing.T) {
 	fakeClient := &client.Fake{Err: errors.New("test")}
 	services := make(chan ServiceUpdate)
-	source := SourceAPI{client: fakeClient, services: services}
-	resourceVersion := uint64(0)
+	source := SourceAPI{
+		s: servicesReflector{watcher: fakeClient.Services(api.NamespaceAll), services: services},
+		e: endpointsReflector{watcher: fakeClient.Endpoints(api.NamespaceAll)}}
+	resourceVersion := ""
 	ch := make(chan struct{})
 	go func() {
-		source.runServices(&resourceVersion)
+		source.s.run(&resourceVersion)
 		close(ch)
 	}()
 
 	// should have listed only
 	<-ch
-	if resourceVersion != 0 {
+	if resourceVersion != "" {
 		t.Errorf("unexpected resource version, got %#v", resourceVersion)
 	}
 	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"list-services", nil}}) {
@@ -152,22 +183,24 @@ func TestServicesFromZeroError(t *testing.T) {
 }
 
 func TestEndpoints(t *testing.T) {
-	endpoint := api.Endpoints{JSONBase: api.JSONBase{ID: "bar", ResourceVersion: uint64(2)}, Endpoints: []string{"127.0.0.1:9000"}}
+	endpoint := api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "bar", ResourceVersion: "2"}, Endpoints: []string{"127.0.0.1:9000"}}
 
 	fakeWatch := watch.NewFake()
 	fakeClient := &client.Fake{Watch: fakeWatch}
 	endpoints := make(chan EndpointsUpdate)
-	source := SourceAPI{client: fakeClient, endpoints: endpoints}
-	resourceVersion := uint64(1)
+	source := SourceAPI{
+		s: servicesReflector{watcher: fakeClient.Services(api.NamespaceAll)},
+		e: endpointsReflector{watcher: fakeClient.Endpoints(api.NamespaceAll), endpoints: endpoints}}
+	resourceVersion := "1"
 	go func() {
 		// called twice
-		source.runEndpoints(&resourceVersion)
-		source.runEndpoints(&resourceVersion)
+		source.e.run(&resourceVersion)
+		source.e.run(&resourceVersion)
 	}()
 
 	// test adding an endpoint to the watch
 	fakeWatch.Add(&endpoint)
-	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-endpoints", uint64(1)}}) {
+	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-endpoints", "1"}}) {
 		t.Errorf("expected call to watch-endpoints, got %#v", fakeClient)
 	}
 
@@ -191,29 +224,31 @@ func TestEndpoints(t *testing.T) {
 	fakeWatch.Stop()
 
 	newFakeWatch.Add(&endpoint)
-	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-endpoints", uint64(1)}, {"watch-endpoints", uint64(3)}}) {
+	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-endpoints", "1"}, {"watch-endpoints", "2"}}) {
 		t.Errorf("expected call to watch-endpoints, got %#v", fakeClient)
 	}
 }
 
 func TestEndpointsFromZero(t *testing.T) {
-	endpoint := api.Endpoints{JSONBase: api.JSONBase{ID: "bar", ResourceVersion: uint64(2)}, Endpoints: []string{"127.0.0.1:9000"}}
+	endpoint := api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "bar", ResourceVersion: "2"}, Endpoints: []string{"127.0.0.1:9000"}}
 
 	fakeWatch := watch.NewFake()
 	fakeWatch.Stop()
 	fakeClient := &client.Fake{Watch: fakeWatch}
 	fakeClient.EndpointsList = api.EndpointsList{
-		JSONBase: api.JSONBase{ResourceVersion: 2},
+		ListMeta: api.ListMeta{ResourceVersion: "2"},
 		Items: []api.Endpoints{
 			endpoint,
 		},
 	}
 	endpoints := make(chan EndpointsUpdate)
-	source := SourceAPI{client: fakeClient, endpoints: endpoints}
-	resourceVersion := uint64(0)
+	source := SourceAPI{
+		s: servicesReflector{watcher: fakeClient.Services(api.NamespaceAll)},
+		e: endpointsReflector{watcher: fakeClient.Endpoints(api.NamespaceAll), endpoints: endpoints}}
+	resourceVersion := ""
 	ch := make(chan struct{})
 	go func() {
-		source.runEndpoints(&resourceVersion)
+		source.e.run(&resourceVersion)
 		close(ch)
 	}()
 
@@ -226,10 +261,10 @@ func TestEndpointsFromZero(t *testing.T) {
 
 	// should have listed, then watched
 	<-ch
-	if resourceVersion != 2 {
+	if resourceVersion != "2" {
 		t.Errorf("unexpected resource version, got %#v", resourceVersion)
 	}
-	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"list-endpoints", nil}, {"watch-endpoints", uint64(2)}}) {
+	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"list-endpoints", nil}, {"watch-endpoints", "2"}}) {
 		t.Errorf("unexpected actions, got %#v", fakeClient)
 	}
 }
@@ -237,20 +272,45 @@ func TestEndpointsFromZero(t *testing.T) {
 func TestEndpointsError(t *testing.T) {
 	fakeClient := &client.Fake{Err: errors.New("test")}
 	endpoints := make(chan EndpointsUpdate)
-	source := SourceAPI{client: fakeClient, endpoints: endpoints}
-	resourceVersion := uint64(1)
+	source := SourceAPI{
+		s: servicesReflector{watcher: fakeClient.Services(api.NamespaceAll)},
+		e: endpointsReflector{watcher: fakeClient.Endpoints(api.NamespaceAll), endpoints: endpoints}}
+	resourceVersion := "1"
 	ch := make(chan struct{})
 	go func() {
-		source.runEndpoints(&resourceVersion)
+		source.e.run(&resourceVersion)
 		close(ch)
 	}()
 
 	// should have listed only
 	<-ch
-	if resourceVersion != 1 {
+	if resourceVersion != "" {
 		t.Errorf("unexpected resource version, got %#v", resourceVersion)
 	}
-	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-endpoints", uint64(1)}}) {
+	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-endpoints", "1"}}) {
+		t.Errorf("unexpected actions, got %#v", fakeClient)
+	}
+}
+
+func TestEndpointsErrorTimeout(t *testing.T) {
+	fakeClient := &client.Fake{Err: errors.New("use of closed network connection")}
+	endpoints := make(chan EndpointsUpdate)
+	source := SourceAPI{
+		s: servicesReflector{watcher: fakeClient.Services(api.NamespaceAll)},
+		e: endpointsReflector{watcher: fakeClient.Endpoints(api.NamespaceAll), endpoints: endpoints}}
+	resourceVersion := "1"
+	ch := make(chan struct{})
+	go func() {
+		source.e.run(&resourceVersion)
+		close(ch)
+	}()
+
+	// should have listed only
+	<-ch
+	if resourceVersion != "1" {
+		t.Errorf("unexpected resource version, got %#v", resourceVersion)
+	}
+	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"watch-endpoints", "1"}}) {
 		t.Errorf("unexpected actions, got %#v", fakeClient)
 	}
 }
@@ -258,17 +318,19 @@ func TestEndpointsError(t *testing.T) {
 func TestEndpointsFromZeroError(t *testing.T) {
 	fakeClient := &client.Fake{Err: errors.New("test")}
 	endpoints := make(chan EndpointsUpdate)
-	source := SourceAPI{client: fakeClient, endpoints: endpoints}
-	resourceVersion := uint64(0)
+	source := SourceAPI{
+		s: servicesReflector{watcher: fakeClient.Services(api.NamespaceAll)},
+		e: endpointsReflector{watcher: fakeClient.Endpoints(api.NamespaceAll), endpoints: endpoints}}
+	resourceVersion := ""
 	ch := make(chan struct{})
 	go func() {
-		source.runEndpoints(&resourceVersion)
+		source.e.run(&resourceVersion)
 		close(ch)
 	}()
 
 	// should have listed only
 	<-ch
-	if resourceVersion != 0 {
+	if resourceVersion != "" {
 		t.Errorf("unexpected resource version, got %#v", resourceVersion)
 	}
 	if !reflect.DeepEqual(fakeClient.Actions, []client.FakeAction{{"list-endpoints", nil}}) {

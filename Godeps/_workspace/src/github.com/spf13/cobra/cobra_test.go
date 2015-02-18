@@ -26,9 +26,10 @@ var cmdPrint = &Command{
 }
 
 var cmdEcho = &Command{
-	Use:   "echo [string to echo]",
-	Short: "Echo anything to the screen",
-	Long:  `an utterly useless command for testing.`,
+	Use:     "echo [string to echo]",
+	Aliases: []string{"say"},
+	Short:   "Echo anything to the screen",
+	Long:    `an utterly useless command for testing.`,
 	Run: func(cmd *Command, args []string) {
 		te = args
 	},
@@ -38,7 +39,9 @@ var cmdTimes = &Command{
 	Use:   "times [# times] [string to echo]",
 	Short: "Echo anything to the screen more times",
 	Long:  `an slightly useless command for testing.`,
-	Run:   timesRunner,
+	Run: func(cmd *Command, args []string) {
+		tt = args
+	},
 }
 
 var cmdRootNoRun = &Command{
@@ -60,10 +63,6 @@ var cmdRootWithRun = &Command{
 	Run: func(cmd *Command, args []string) {
 		rootcalled = true
 	},
-}
-
-func timesRunner(cmd *Command, args []string) {
-	tt = args
 }
 
 func flagInit() {
@@ -137,6 +136,24 @@ func noRRSetupTest(input string) resulter {
 	return fullTester(c, input)
 }
 
+func rootOnlySetupTest(input string) resulter {
+	c := initializeWithRootCmd()
+
+	return simpleTester(c, input)
+}
+
+func simpleTester(c *Command, input string) resulter {
+	buf := new(bytes.Buffer)
+	// Testing flag with invalid input
+	c.SetOutput(buf)
+	c.SetArgs(strings.Split(input, " "))
+
+	err := c.Execute()
+	output := buf.String()
+
+	return resulter{err, output, c}
+}
+
 func fullTester(c *Command, input string) resulter {
 	buf := new(bytes.Buffer)
 	// Testing flag with invalid input
@@ -154,6 +171,12 @@ func fullTester(c *Command, input string) resulter {
 func checkResultContains(t *testing.T, x resulter, check string) {
 	if !strings.Contains(x.Output, check) {
 		t.Errorf("Unexpected response.\nExpecting to contain: \n %q\nGot:\n %q\n", check, x.Output)
+	}
+}
+
+func checkResultOmits(t *testing.T, x resulter, check string) {
+	if strings.Contains(x.Output, check) {
+		t.Errorf("Unexpected response.\nExpecting to omit: \n %q\nGot:\n %q\n", check, x.Output)
 	}
 }
 
@@ -195,8 +218,8 @@ func TestChildCommand(t *testing.T) {
 	}
 }
 
-func TestChildCommandPrefix(t *testing.T) {
-	noRRSetupTest("ech tim one two")
+func TestCommandAlias(t *testing.T) {
+	noRRSetupTest("say times one two")
 
 	if te != nil || tp != nil {
 		t.Error("Wrong command called")
@@ -209,27 +232,53 @@ func TestChildCommandPrefix(t *testing.T) {
 	}
 }
 
+func TestPrefixMatching(t *testing.T) {
+	EnablePrefixMatching = true
+	noRRSetupTest("ech times one two")
+
+	if te != nil || tp != nil {
+		t.Error("Wrong command called")
+	}
+	if tt == nil {
+		t.Error("Wrong command called")
+	}
+	if strings.Join(tt, " ") != "one two" {
+		t.Error("Command didn't parse correctly")
+	}
+
+	EnablePrefixMatching = false
+}
+
+func TestNoPrefixMatching(t *testing.T) {
+	EnablePrefixMatching = false
+
+	noRRSetupTest("ech times one two")
+
+	if !(tt == nil && te == nil && tp == nil) {
+		t.Error("Wrong command called")
+	}
+}
+
+func TestAliasPrefixMatching(t *testing.T) {
+	EnablePrefixMatching = true
+	noRRSetupTest("sa times one two")
+
+	if te != nil || tp != nil {
+		t.Error("Wrong command called")
+	}
+	if tt == nil {
+		t.Error("Wrong command called")
+	}
+	if strings.Join(tt, " ") != "one two" {
+		t.Error("Command didn't parse correctly")
+	}
+	EnablePrefixMatching = false
+}
+
 func TestChildSameName(t *testing.T) {
 	c := initializeWithSameName()
 	c.AddCommand(cmdPrint, cmdEcho)
 	c.SetArgs(strings.Split("print one two", " "))
-	c.Execute()
-
-	if te != nil || tt != nil {
-		t.Error("Wrong command called")
-	}
-	if tp == nil {
-		t.Error("Wrong command called")
-	}
-	if strings.Join(tp, " ") != "one two" {
-		t.Error("Command didn't parse correctly")
-	}
-}
-
-func TestChildSameNamePrefix(t *testing.T) {
-	c := initializeWithSameName()
-	c.AddCommand(cmdPrint, cmdEcho)
-	c.SetArgs(strings.Split("pr one two", " "))
 	c.Execute()
 
 	if te != nil || tt != nil {
@@ -412,6 +461,7 @@ func TestRootHelp(t *testing.T) {
 	x := fullSetupTest("--help")
 
 	checkResultContains(t, x, "Available Commands:")
+	checkResultContains(t, x, "for more information about a command")
 
 	if strings.Contains(x.Output, "unknown flag: --help") {
 		t.Errorf("--help shouldn't trigger an error, Got: \n %s", x.Output)
@@ -420,11 +470,32 @@ func TestRootHelp(t *testing.T) {
 	x = fullSetupTest("echo --help")
 
 	checkResultContains(t, x, "Available Commands:")
+	checkResultContains(t, x, "for more information about a command")
 
 	if strings.Contains(x.Output, "unknown flag: --help") {
 		t.Errorf("--help shouldn't trigger an error, Got: \n %s", x.Output)
 	}
 
+}
+
+func TestRootNoCommandHelp(t *testing.T) {
+	x := rootOnlySetupTest("--help")
+
+	checkResultOmits(t, x, "Available Commands:")
+	checkResultOmits(t, x, "for more information about a command")
+
+	if strings.Contains(x.Output, "unknown flag: --help") {
+		t.Errorf("--help shouldn't trigger an error, Got: \n %s", x.Output)
+	}
+
+	x = rootOnlySetupTest("echo --help")
+
+	checkResultOmits(t, x, "Available Commands:")
+	checkResultOmits(t, x, "for more information about a command")
+
+	if strings.Contains(x.Output, "unknown flag: --help") {
+		t.Errorf("--help shouldn't trigger an error, Got: \n %s", x.Output)
+	}
 }
 
 func TestFlagsBeforeCommand(t *testing.T) {

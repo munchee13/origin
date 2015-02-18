@@ -24,27 +24,68 @@ import (
 )
 
 // RESTStorage is a generic interface for RESTful storage services.
-// Resources which are exported to the RESTful API of apiserver need to implement this interface.
+// Resources which are exported to the RESTful API of apiserver need to implement this interface. It is expected
+// that objects may implement any of the REST* interfaces.
+// TODO: implement dynamic introspection (so GenericREST objects can indicate what they implement)
 type RESTStorage interface {
 	// New returns an empty object that can be used with Create and Update after request data has been put into it.
 	// This object must be a pointer type for use with Codec.DecodeInto([]byte, runtime.Object)
 	New() runtime.Object
+}
 
+type RESTLister interface {
+	// NewList returns an empty object that can be used with the List call.
+	// This object must be a pointer type for use with Codec.DecodeInto([]byte, runtime.Object)
+	NewList() runtime.Object
 	// List selects resources in the storage which match to the selector.
 	List(ctx api.Context, label, field labels.Selector) (runtime.Object, error)
+}
 
+type RESTGetter interface {
 	// Get finds a resource in the storage by id and returns it.
 	// Although it can return an arbitrary error value, IsNotFound(err) is true for the
 	// returned error value err when the specified resource is not found.
 	Get(ctx api.Context, id string) (runtime.Object, error)
+}
 
+type RESTDeleter interface {
 	// Delete finds a resource in the storage and deletes it.
 	// Although it can return an arbitrary error value, IsNotFound(err) is true for the
 	// returned error value err when the specified resource is not found.
-	Delete(ctx api.Context, id string) (<-chan runtime.Object, error)
+	// Delete *may* return the object that was deleted, or a status object indicating additional
+	// information about deletion.
+	Delete(ctx api.Context, id string) (runtime.Object, error)
+}
 
-	Create(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error)
-	Update(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error)
+type RESTCreater interface {
+	// New returns an empty object that can be used with Create after request data has been put into it.
+	// This object must be a pointer type for use with Codec.DecodeInto([]byte, runtime.Object)
+	New() runtime.Object
+
+	// Create creates a new version of a resource.
+	Create(ctx api.Context, obj runtime.Object) (runtime.Object, error)
+}
+
+type RESTUpdater interface {
+	// New returns an empty object that can be used with Update after request data has been put into it.
+	// This object must be a pointer type for use with Codec.DecodeInto([]byte, runtime.Object)
+	New() runtime.Object
+
+	// Update finds a resource in the storage and updates it. Some implementations
+	// may allow updates creates the object - they should set the created boolean
+	// to true.
+	Update(ctx api.Context, obj runtime.Object) (runtime.Object, bool, error)
+}
+
+// RESTResult indicates the result of a REST transformation.
+type RESTResult struct {
+	// The result of this operation. May be nil if the operation has no meaningful
+	// result (like Delete)
+	runtime.Object
+
+	// May be set true to indicate that the Update operation resulted in the object
+	// being created.
+	Created bool
 }
 
 // ResourceWatcher should be implemented by all RESTStorage objects that
@@ -54,7 +95,7 @@ type ResourceWatcher interface {
 	// are supported; an error should be returned if 'field' tries to select on a field that
 	// isn't supported. 'resourceVersion' allows for continuing/starting a watch at a
 	// particular version.
-	Watch(ctx api.Context, label, field labels.Selector, resourceVersion uint64) (watch.Interface, error)
+	Watch(ctx api.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error)
 }
 
 // Redirector know how to return a remote resource's location.

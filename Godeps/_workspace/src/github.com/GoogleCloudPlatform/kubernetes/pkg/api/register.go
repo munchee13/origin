@@ -20,26 +20,68 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
 
+// Scheme is the default instance of runtime.Scheme to which types in the Kubernetes API are already registered.
 var Scheme = runtime.NewScheme()
 
 func init() {
 	Scheme.AddKnownTypes("",
-		&PodList{},
 		&Pod{},
+		&PodList{},
+		&PodStatusResult{},
 		&ReplicationControllerList{},
 		&ReplicationController{},
 		&ServiceList{},
 		&Service{},
-		&MinionList{},
-		&Minion{},
+		&NodeList{},
+		&Node{},
 		&Status{},
-		&ServerOpList{},
-		&ServerOp{},
-		&ContainerManifestList{},
 		&Endpoints{},
 		&EndpointsList{},
 		&Binding{},
 		&Event{},
 		&EventList{},
+		&ContainerManifest{},
+		&ContainerManifestList{},
+		&BoundPod{},
+		&BoundPods{},
+		&List{},
+		&LimitRange{},
+		&LimitRangeList{},
+		&ResourceQuota{},
+		&ResourceQuotaList{},
+		&ResourceQuotaUsage{},
+		&Namespace{},
+		&NamespaceList{},
 	)
+	// Legacy names are supported
+	Scheme.AddKnownTypeWithName("", "Minion", &Node{})
+	Scheme.AddKnownTypeWithName("", "MinionList", &NodeList{})
 }
+
+func (*Pod) IsAnAPIObject()                       {}
+func (*PodList) IsAnAPIObject()                   {}
+func (*PodStatusResult) IsAnAPIObject()           {}
+func (*ReplicationController) IsAnAPIObject()     {}
+func (*ReplicationControllerList) IsAnAPIObject() {}
+func (*Service) IsAnAPIObject()                   {}
+func (*ServiceList) IsAnAPIObject()               {}
+func (*Endpoints) IsAnAPIObject()                 {}
+func (*EndpointsList) IsAnAPIObject()             {}
+func (*Node) IsAnAPIObject()                      {}
+func (*NodeList) IsAnAPIObject()                  {}
+func (*Binding) IsAnAPIObject()                   {}
+func (*Status) IsAnAPIObject()                    {}
+func (*Event) IsAnAPIObject()                     {}
+func (*EventList) IsAnAPIObject()                 {}
+func (*ContainerManifest) IsAnAPIObject()         {}
+func (*ContainerManifestList) IsAnAPIObject()     {}
+func (*BoundPod) IsAnAPIObject()                  {}
+func (*BoundPods) IsAnAPIObject()                 {}
+func (*List) IsAnAPIObject()                      {}
+func (*LimitRange) IsAnAPIObject()                {}
+func (*LimitRangeList) IsAnAPIObject()            {}
+func (*ResourceQuota) IsAnAPIObject()             {}
+func (*ResourceQuotaList) IsAnAPIObject()         {}
+func (*ResourceQuotaUsage) IsAnAPIObject()        {}
+func (*Namespace) IsAnAPIObject()                 {}
+func (*NamespaceList) IsAnAPIObject()             {}

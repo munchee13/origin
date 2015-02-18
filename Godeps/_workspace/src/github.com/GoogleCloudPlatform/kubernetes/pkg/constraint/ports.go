@@ -20,22 +20,24 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 )
 
-// PortsConflict returns true iff two containers attempt to expose
-// the same host port.
-func PortsConflict(manifests []api.ContainerManifest) bool {
+// hostPortsConflict returns an array of host ports that at least two
+// containers attempt to expose. The array is empty if no such port
+// exists.
+func hostPortsConflict(pods []api.BoundPod) []int {
 	hostPorts := map[int]struct{}{}
-	for _, manifest := range manifests {
-		for _, container := range manifest.Containers {
+	conflictingPorts := []int{}
+	for _, pod := range pods {
+		for _, container := range pod.Spec.Containers {
 			for _, port := range container.Ports {
 				if port.HostPort == 0 {
 					continue
 				}
 				if _, exists := hostPorts[port.HostPort]; exists {
-					return true
+					conflictingPorts = append(conflictingPorts, port.HostPort)
 				}
 				hostPorts[port.HostPort] = struct{}{}
 			}
 		}
 	}
-	return false
+	return conflictingPorts
 }

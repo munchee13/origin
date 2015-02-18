@@ -5,11 +5,14 @@ import (
 	"net/http"
 	"strings"
 
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/openshift/origin/pkg/build/api"
-	"github.com/openshift/origin/pkg/client"
+	buildclient "github.com/openshift/origin/pkg/build/client"
+	buildutil "github.com/openshift/origin/pkg/build/util"
+	osclient "github.com/openshift/origin/pkg/client"
 )
 
-// Webhook verification is dependent on the sending side, it can be
+// Plugin for Webhook verification is dependent on the sending side, it can be
 // eg. github, bitbucket or else, so there must be a separate Plugin
 // instance for each webhook provider.
 type Plugin interface {
@@ -17,43 +20,47 @@ type Plugin interface {
 	// - newly created build object or nil if default is to be created
 	// - information whether to trigger the build itself
 	// - eventual error.
-	Extract(buildCfg *api.BuildConfig, path string, req *http.Request) (*api.Build, bool, error)
+	Extract(buildCfg *api.BuildConfig, secret, path string, req *http.Request) (*api.SourceRevision, bool, error)
 }
 
 // controller used for processing webhook requests.
 type controller struct {
-	osClient client.Interface
-	plugins  map[string]Plugin
+	buildCreator      buildclient.BuildCreator
+	buildConfigGetter buildclient.BuildConfigGetter
+	imageRepoGetter   osclient.ImageRepositoryNamespaceGetter
+	plugins           map[string]Plugin
 }
 
 // urlVars holds parsed URL parts.
 type urlVars struct {
-	buildId string
-	secret  string
-	plugin  string
-	path    string
+	namespace       string
+	buildConfigName string
+	secret          string
+	plugin          string
+	path            string
 }
 
 // NewController creates new webhook controller and feed it with provided plugins.
-func NewController(osClient client.Interface, plugins map[string]Plugin) http.Handler {
-	return &controller{osClient: osClient, plugins: plugins}
+func NewController(buildConfigGetter buildclient.BuildConfigGetter, buildCreator buildclient.BuildCreator, imageRepoGetter osclient.ImageRepositoryNamespaceGetter, plugins map[string]Plugin) http.Handler {
+	return &controller{
+		buildConfigGetter: buildConfigGetter,
+		buildCreator:      buildCreator,
+		imageRepoGetter:   imageRepoGetter,
+		plugins:           plugins,
+	}
 }
 
 // ServeHTTP main REST service method.
 func (c *controller) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	uv, err := parseUrl(req.URL.Path)
+	uv, err := parseURL(req)
 	if err != nil {
 		notFound(w, err.Error())
 		return
 	}
 
-	buildCfg, err := c.osClient.GetBuildConfig(uv.buildId)
+	buildCfg, err := c.buildConfigGetter.Get(uv.namespace, uv.buildConfigName)
 	if err != nil {
 		badRequest(w, err.Error())
-		return
-	}
-	if uv.secret != buildCfg.Secret {
-		badRequest(w, "")
 		return
 	}
 
@@ -62,7 +69,7 @@ func (c *controller) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		notFound(w, "Plugin ", uv.plugin, " not found")
 		return
 	}
-	build, proceed, err := plugin.Extract(buildCfg, uv.path, req)
+	revision, proceed, err := plugin.Extract(buildCfg, uv.secret, uv.path, req)
 	if err != nil {
 		badRequest(w, err.Error())
 		return
@@ -70,27 +77,47 @@ func (c *controller) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if !proceed {
 		return
 	}
-	if build == nil {
-		build = &api.Build{
-			Input: buildCfg.DesiredInput,
-		}
+	build, err := buildutil.GenerateBuildWithImageTag(buildCfg, revision, c.imageRepoGetter)
+	if err != nil {
+		badRequest(w, err.Error())
+		return
 	}
-
-	if _, err := c.osClient.CreateBuild(build); err != nil {
+	if err := c.buildCreator.Create(uv.namespace, build); err != nil {
 		badRequest(w, err.Error())
 	}
 }
 
-func parseUrl(url string) (uv urlVars, err error) {
+// parseURL retrieves the namespace from the query parameters and returns a context wrapping the namespace,
+// the parameters for the webhook call, and an error.
+// according to the docs (http://godoc.org/code.google.com/p/go.net/context) ctx is not supposed to be wrapped in another object
+func parseURL(req *http.Request) (uv urlVars, err error) {
+	url := req.URL.Path
+
 	parts := splitPath(url)
 	if len(parts) < 3 {
 		err = fmt.Errorf("Unexpected URL %s", url)
 		return
 	}
-	uv = urlVars{parts[0], parts[1], parts[2], ""}
+	uv = urlVars{
+		namespace:       kapi.NamespaceDefault,
+		buildConfigName: parts[0],
+		secret:          parts[1],
+		plugin:          parts[2],
+		path:            "",
+	}
 	if len(parts) > 3 {
 		uv.path = strings.Join(parts[3:], "/")
 	}
+
+	// TODO for now, we pull namespace from query parameter, but according to spec, it must go in resource path in future PR
+	// if a namespace if specified, it's always used.
+	// for list/watch operations, a namespace is not required if omitted.
+	// for all other operations, if namespace is omitted, we will default to default namespace.
+	namespace := req.URL.Query().Get("namespace")
+	if len(namespace) > 0 {
+		uv.namespace = namespace
+	}
+
 	return
 }
 

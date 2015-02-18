@@ -3,16 +3,17 @@ package client
 import (
 	"fmt"
 	"io"
+	"strings"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubecfg"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/openshift/origin/pkg/deploy/api"
 )
 
-var deploymentColumns = []string{"ID", "State"}
-var deploymentConfigColumns = []string{"ID", "Trigger Policy"}
+var deploymentColumns = []string{"Name", "Status", "Cause"}
+var deploymentConfigColumns = []string{"Name", "Triggers", "LatestVersion"}
 
 // RegisterPrintHandlers registers human-readable printers for deploy types.
-func RegisterPrintHandlers(printer *kubecfg.HumanReadablePrinter) {
+func RegisterPrintHandlers(printer *kubectl.HumanReadablePrinter) {
 	printer.Handler(deploymentColumns, printDeployment)
 	printer.Handler(deploymentColumns, printDeploymentList)
 	printer.Handler(deploymentConfigColumns, printDeploymentConfig)
@@ -20,7 +21,14 @@ func RegisterPrintHandlers(printer *kubecfg.HumanReadablePrinter) {
 }
 
 func printDeployment(d *api.Deployment, w io.Writer) error {
-	_, err := fmt.Fprintf(w, "%s\t%s\n", d.ID, d.State)
+	causes := util.StringSet{}
+	if d.Details != nil {
+		for _, cause := range d.Details.Causes {
+			causes.Insert(string(cause.Type))
+		}
+	}
+	cStr := strings.Join(causes.List(), ", ")
+	_, err := fmt.Fprintf(w, "%s\t%s\t%s\n", d.Name, d.Status, cStr)
 	return err
 }
 
@@ -35,7 +43,13 @@ func printDeploymentList(list *api.DeploymentList, w io.Writer) error {
 }
 
 func printDeploymentConfig(dc *api.DeploymentConfig, w io.Writer) error {
-	_, err := fmt.Fprintf(w, "%s\t%s\n", dc.ID, dc.TriggerPolicy)
+	triggers := util.StringSet{}
+	for _, trigger := range dc.Triggers {
+		triggers.Insert(string(trigger.Type))
+	}
+	tStr := strings.Join(triggers.List(), ", ")
+
+	_, err := fmt.Fprintf(w, "%s\t%s\t%v\n", dc.Name, tStr, dc.LatestVersion)
 	return err
 }
 

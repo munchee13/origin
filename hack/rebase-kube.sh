@@ -17,15 +17,11 @@ echo "Hit ENTER to continue or CTRL+C to cancel"
 read
 
 pushd $GOPATH/src/github.com/GoogleCloudPlatform/kubernetes > /dev/null
-if [[ $(git remote -v | grep -c 'openshift/kubernetes.git') -eq 0 ]]; then
-  echo "You must have the OpenShift kubernetes repo set as a remote in $(pwd)"
-  echo
-  echo "  $ git remote add openshift git@github.com:openshift/kubernetes.git"
-  echo
-fi
 echo "Fetching latest ..."
 git fetch
+git fetch --tags
 popd > /dev/null
+git fetch --tags
 
 echo "Restoring Origin dependencies ..."
 make clean
@@ -34,7 +30,7 @@ godep restore
 pushd $GOPATH/src/github.com/GoogleCloudPlatform/kubernetes > /dev/null
 git checkout stable_proposed
 echo "Restoring any newer Kubernetes dependencies ..."
-make clean
+rm -rf _output Godeps/_workspace/pkg
 godep restore
 popd > /dev/null
 
@@ -50,3 +46,4 @@ if ! godep save ./... ; then
 fi
 git add .
 echo "SUCCESS: Added all new dependencies, review Godeps/Godeps.json"
+echo "  To check upstreams, run: git log -E --grep=\"^UPSTREAM:|^bump\" --oneline"

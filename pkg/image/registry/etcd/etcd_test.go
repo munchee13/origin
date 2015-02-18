@@ -3,28 +3,72 @@ package etcd
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 
-	kubeapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 	"github.com/coreos/go-etcd/etcd"
-	"github.com/fsouza/go-dockerclient"
 
 	"github.com/openshift/origin/pkg/api/latest"
 	"github.com/openshift/origin/pkg/image/api"
 )
 
+// This copy and paste is not pure ignorance.  This is that we can be sure that the key is getting made as we
+// expect it to. If someone changes the location of these resources by say moving all the resources to
+// "/origin/resources" (which is a really good idea), then they've made a breaking change and something should
+// fail to let them know they've change some significant change and that other dependent pieces may break.
+func makeTestImageListKey(namespace string) string {
+	if len(namespace) != 0 {
+		return "/images/" + namespace
+	}
+	return "/images"
+}
+func makeTestImageKey(namespace, id string) string {
+	return "/images/" + namespace + "/" + id
+}
+func makeTestDefaultImageKey(id string) string {
+	return makeTestImageKey(kapi.NamespaceDefault, id)
+}
+func makeTestDefaultImageListKey() string {
+	return makeTestImageListKey(kapi.NamespaceDefault)
+}
+func makeTestImageRepositoriesListKey(namespace string) string {
+	if len(namespace) != 0 {
+		return "/imageRepositories/" + namespace
+	}
+	return "/imageRepositories"
+}
+func makeTestImageRepositoriesKey(namespace, id string) string {
+	return "/imageRepositories/" + namespace + "/" + id
+}
+func makeTestDefaultImageRepositoriesKey(id string) string {
+	return makeTestImageRepositoriesKey(kapi.NamespaceDefault, id)
+}
+func makeTestDefaultImageRepositoriesListKey() string {
+	return makeTestImageRepositoriesListKey(kapi.NamespaceDefault)
+}
+
+var (
+	testDefaultRegistry = DefaultRegistryFunc(func() (string, bool) { return "test", true })
+	noDefaultRegistry   = DefaultRegistryFunc(func() (string, bool) {
+		return "", false
+	})
+)
+
 func NewTestEtcd(client tools.EtcdClient) *Etcd {
-	return New(tools.EtcdHelper{client, latest.Codec, latest.ResourceVersioner})
+	return New(tools.EtcdHelper{client, latest.Codec, tools.RuntimeVersionAdapter{latest.ResourceVersioner}}, noDefaultRegistry)
 }
 
 func TestEtcdListImagesEmpty(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	key := "/images"
+	key := makeTestDefaultImageListKey()
 	fakeClient.Data[key] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: &etcd.Node{
@@ -34,7 +78,7 @@ func TestEtcdListImagesEmpty(t *testing.T) {
 		E: nil,
 	}
 	registry := NewTestEtcd(fakeClient)
-	images, err := registry.ListImages(labels.Everything())
+	images, err := registry.ListImages(kapi.NewDefaultContext(), labels.Everything())
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -46,7 +90,7 @@ func TestEtcdListImagesEmpty(t *testing.T) {
 
 func TestEtcdListImagesError(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	key := "/images"
+	key := makeTestDefaultImageListKey()
 	fakeClient.Data[key] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: nil,
@@ -54,7 +98,7 @@ func TestEtcdListImagesError(t *testing.T) {
 		E: fmt.Errorf("some error"),
 	}
 	registry := NewTestEtcd(fakeClient)
-	images, err := registry.ListImages(labels.Everything())
+	images, err := registry.ListImages(kapi.NewDefaultContext(), labels.Everything())
 	if err == nil {
 		t.Error("unexpected nil error")
 	}
@@ -66,16 +110,16 @@ func TestEtcdListImagesError(t *testing.T) {
 
 func TestEtcdListImagesEverything(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	key := "/images"
+	key := makeTestDefaultImageListKey()
 	fakeClient.Data[key] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: &etcd.Node{
 				Nodes: []*etcd.Node{
 					{
-						Value: runtime.EncodeOrDie(latest.Codec, &api.Image{JSONBase: kubeapi.JSONBase{ID: "foo"}}),
+						Value: runtime.EncodeOrDie(latest.Codec, &api.Image{ObjectMeta: kapi.ObjectMeta{Name: "foo"}}),
 					},
 					{
-						Value: runtime.EncodeOrDie(latest.Codec, &api.Image{JSONBase: kubeapi.JSONBase{ID: "bar"}}),
+						Value: runtime.EncodeOrDie(latest.Codec, &api.Image{ObjectMeta: kapi.ObjectMeta{Name: "bar"}}),
 					},
 				},
 			},
@@ -83,33 +127,37 @@ func TestEtcdListImagesEverything(t *testing.T) {
 		E: nil,
 	}
 	registry := NewTestEtcd(fakeClient)
-	images, err := registry.ListImages(labels.Everything())
+	images, err := registry.ListImages(kapi.NewDefaultContext(), labels.Everything())
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	if len(images.Items) != 2 || images.Items[0].ID != "foo" || images.Items[1].ID != "bar" {
+	if len(images.Items) != 2 || images.Items[0].Name != "foo" || images.Items[1].Name != "bar" {
 		t.Errorf("Unexpected images list: %#v", images)
 	}
 }
 
 func TestEtcdListImagesFiltered(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	key := "/images"
+	key := makeTestDefaultImageListKey()
 	fakeClient.Data[key] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: &etcd.Node{
 				Nodes: []*etcd.Node{
 					{
 						Value: runtime.EncodeOrDie(latest.Codec, &api.Image{
-							JSONBase: kubeapi.JSONBase{ID: "foo"},
-							Labels:   map[string]string{"env": "prod"},
+							ObjectMeta: kapi.ObjectMeta{
+								Name:   "foo",
+								Labels: map[string]string{"env": "prod"},
+							},
 						}),
 					},
 					{
 						Value: runtime.EncodeOrDie(latest.Codec, &api.Image{
-							JSONBase: kubeapi.JSONBase{ID: "bar"},
-							Labels:   map[string]string{"env": "dev"},
+							ObjectMeta: kapi.ObjectMeta{
+								Name:   "bar",
+								Labels: map[string]string{"env": "dev"},
+							},
 						}),
 					},
 				},
@@ -118,40 +166,40 @@ func TestEtcdListImagesFiltered(t *testing.T) {
 		E: nil,
 	}
 	registry := NewTestEtcd(fakeClient)
-	images, err := registry.ListImages(labels.SelectorFromSet(labels.Set{"env": "dev"}))
+	images, err := registry.ListImages(kapi.NewDefaultContext(), labels.SelectorFromSet(labels.Set{"env": "dev"}))
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	if len(images.Items) != 1 || images.Items[0].ID != "bar" {
+	if len(images.Items) != 1 || images.Items[0].Name != "bar" {
 		t.Errorf("Unexpected images list: %#v", images)
 	}
 }
 
 func TestEtcdGetImage(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	fakeClient.Set("/images/foo", runtime.EncodeOrDie(latest.Codec, &api.Image{JSONBase: kubeapi.JSONBase{ID: "foo"}}), 0)
+	fakeClient.Set(makeTestDefaultImageKey("foo"), runtime.EncodeOrDie(latest.Codec, &api.Image{ObjectMeta: kapi.ObjectMeta{Name: "foo"}}), 0)
 	registry := NewTestEtcd(fakeClient)
-	image, err := registry.GetImage("foo")
+	image, err := registry.GetImage(kapi.NewDefaultContext(), "foo")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	if image.ID != "foo" {
+	if image.Name != "foo" {
 		t.Errorf("Unexpected image: %#v", image)
 	}
 }
 
 func TestEtcdGetImageNotFound(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	fakeClient.Data["/images/foo"] = tools.EtcdResponseWithError{
+	fakeClient.Data[makeTestDefaultImageKey("foo")] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: nil,
 		},
 		E: tools.EtcdErrorNotFound,
 	}
 	registry := NewTestEtcd(fakeClient)
-	image, err := registry.GetImage("foo")
+	image, err := registry.GetImage(kapi.NewDefaultContext(), "foo")
 	if err == nil {
 		t.Errorf("Unexpected non-error.")
 	}
@@ -163,19 +211,19 @@ func TestEtcdGetImageNotFound(t *testing.T) {
 func TestEtcdCreateImage(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	fakeClient.TestIndex = true
-	fakeClient.Data["/images/foo"] = tools.EtcdResponseWithError{
+	fakeClient.Data[makeTestDefaultImageKey("foo")] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: nil,
 		},
 		E: tools.EtcdErrorNotFound,
 	}
 	registry := NewTestEtcd(fakeClient)
-	err := registry.CreateImage(&api.Image{
-		JSONBase: kubeapi.JSONBase{
-			ID: "foo",
+	err := registry.CreateImage(kapi.NewDefaultContext(), &api.Image{
+		ObjectMeta: kapi.ObjectMeta{
+			Name: "foo",
 		},
 		DockerImageReference: "openshift/ruby-19-centos",
-		Metadata: docker.Image{
+		DockerImageMetadata: api.DockerImage{
 			ID: "abc123",
 		},
 	})
@@ -183,7 +231,7 @@ func TestEtcdCreateImage(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	resp, err := fakeClient.Get("/images/foo", false, false)
+	resp, err := fakeClient.Get(makeTestDefaultImageKey("foo"), false, false)
 	if err != nil {
 		t.Fatalf("Unexpected error %v", err)
 	}
@@ -193,7 +241,7 @@ func TestEtcdCreateImage(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	if image.ID != "foo" {
+	if image.Name != "foo" {
 		t.Errorf("Unexpected image: %#v %s", image, resp.Node.Value)
 	}
 
@@ -201,26 +249,54 @@ func TestEtcdCreateImage(t *testing.T) {
 		t.Errorf("Expected %v, got %v", e, a)
 	}
 
-	if e, a := "abc123", image.Metadata.ID; e != a {
+	if e, a := "abc123", image.DockerImageMetadata.ID; e != a {
 		t.Errorf("Expected %v, got %v", e, a)
 	}
 }
 
-func TestEtcdCreateImageAlreadyExists(t *testing.T) {
+func TestEtcdCreateImageAlreadyExistsEquivalent(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	fakeClient.Data["/images/foo"] = tools.EtcdResponseWithError{
+	fakeClient.TestIndex = true
+	fakeClient.Data[makeTestDefaultImageKey("foo")] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: &etcd.Node{
-				Value: runtime.EncodeOrDie(latest.Codec, &api.Image{JSONBase: kubeapi.JSONBase{ID: "foo"}}),
+				Value:         runtime.EncodeOrDie(latest.Codec, &api.Image{ObjectMeta: kapi.ObjectMeta{Name: "foo", ResourceVersion: "1"}}),
+				CreatedIndex:  1,
+				ModifiedIndex: 1,
 			},
 		},
 		E: nil,
 	}
 	registry := NewTestEtcd(fakeClient)
-	err := registry.CreateImage(&api.Image{
-		JSONBase: kubeapi.JSONBase{
-			ID: "foo",
+	err := registry.CreateImage(kapi.NewDefaultContext(), &api.Image{
+		ObjectMeta: kapi.ObjectMeta{
+			Name: "foo",
 		},
+	})
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+}
+
+func TestEtcdCreateImageAlreadyExistsDifferent(t *testing.T) {
+	fakeClient := tools.NewFakeEtcdClient(t)
+	fakeClient.TestIndex = true
+	fakeClient.Data[makeTestDefaultImageKey("foo")] = tools.EtcdResponseWithError{
+		R: &etcd.Response{
+			Node: &etcd.Node{
+				Value:         runtime.EncodeOrDie(latest.Codec, &api.Image{ObjectMeta: kapi.ObjectMeta{Name: "foo", ResourceVersion: "1"}}),
+				CreatedIndex:  1,
+				ModifiedIndex: 1,
+			},
+		},
+		E: nil,
+	}
+	registry := NewTestEtcd(fakeClient)
+	err := registry.CreateImage(kapi.NewDefaultContext(), &api.Image{
+		ObjectMeta: kapi.ObjectMeta{
+			Name: "foo",
+		},
+		DockerImageReference: "foo",
 	})
 	if err == nil {
 		t.Error("Unexpected non-error")
@@ -233,7 +309,7 @@ func TestEtcdCreateImageAlreadyExists(t *testing.T) {
 func TestEtcdUpdateImage(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	registry := NewTestEtcd(fakeClient)
-	err := registry.UpdateImage(&api.Image{})
+	err := registry.UpdateImage(kapi.NewDefaultContext(), &api.Image{})
 	if err == nil {
 		t.Error("Unexpected non-error")
 	}
@@ -243,7 +319,7 @@ func TestEtcdDeleteImageNotFound(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	fakeClient.Err = tools.EtcdErrorNotFound
 	registry := NewTestEtcd(fakeClient)
-	err := registry.DeleteImage("foo")
+	err := registry.DeleteImage(kapi.NewDefaultContext(), "foo")
 	if err == nil {
 		t.Error("Unexpected non-error")
 	}
@@ -256,7 +332,7 @@ func TestEtcdDeleteImageError(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	fakeClient.Err = fmt.Errorf("Some error")
 	registry := NewTestEtcd(fakeClient)
-	err := registry.DeleteImage("foo")
+	err := registry.DeleteImage(kapi.NewDefaultContext(), "foo")
 	if err == nil {
 		t.Error("Unexpected non-error")
 	}
@@ -265,8 +341,8 @@ func TestEtcdDeleteImageError(t *testing.T) {
 func TestEtcdDeleteImageOK(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	registry := NewTestEtcd(fakeClient)
-	key := "/images/foo"
-	err := registry.DeleteImage("foo")
+	key := makeTestDefaultImageListKey() + "/foo"
+	err := registry.DeleteImage(kapi.NewDefaultContext(), "foo")
 	if err != nil {
 		t.Errorf("Unexpected error: %#v", err)
 	}
@@ -277,9 +353,112 @@ func TestEtcdDeleteImageOK(t *testing.T) {
 	}
 }
 
+func TestEtcdWatchImagesErrorWithFieldSet(t *testing.T) {
+	fakeClient := tools.NewFakeEtcdClient(t)
+	registry := NewTestEtcd(fakeClient)
+
+	_, err := registry.WatchImages(kapi.NewDefaultContext(), labels.Everything(), labels.SelectorFromSet(labels.Set{"foo": "bar"}), "1")
+	if err == nil {
+		t.Fatal("unexpected nil error")
+	}
+	if err.Error() != "field selectors are not supported on images" {
+		t.Fatalf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestEtcdWatchImagesOK(t *testing.T) {
+	fakeClient := tools.NewFakeEtcdClient(t)
+	registry := NewTestEtcd(fakeClient)
+
+	var tests = []struct {
+		label    labels.Selector
+		images   []*api.Image
+		expected []bool
+	}{
+		{
+			labels.Everything(),
+			[]*api.Image{
+				{ObjectMeta: kapi.ObjectMeta{Name: "a"}, DockerImageMetadata: api.DockerImage{}},
+				{ObjectMeta: kapi.ObjectMeta{Name: "b"}, DockerImageMetadata: api.DockerImage{}},
+				{ObjectMeta: kapi.ObjectMeta{Name: "c"}, DockerImageMetadata: api.DockerImage{}},
+			},
+			[]bool{
+				true,
+				true,
+				true,
+			},
+		},
+		{
+			labels.SelectorFromSet(labels.Set{"color": "blue"}),
+			[]*api.Image{
+				{ObjectMeta: kapi.ObjectMeta{Name: "a", Labels: map[string]string{"color": "blue"}}, DockerImageMetadata: api.DockerImage{}},
+				{ObjectMeta: kapi.ObjectMeta{Name: "b", Labels: map[string]string{"color": "green"}}, DockerImageMetadata: api.DockerImage{}},
+				{ObjectMeta: kapi.ObjectMeta{Name: "c", Labels: map[string]string{"color": "blue"}}, DockerImageMetadata: api.DockerImage{}},
+			},
+			[]bool{
+				true,
+				false,
+				true,
+			},
+		},
+	}
+	for _, tt := range tests {
+		watching, err := registry.WatchImages(kapi.NewDefaultContext(), tt.label, labels.Everything(), "1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		fakeClient.WaitForWatchCompletion()
+
+		for testIndex, image := range tt.images {
+			imageBytes, _ := latest.Codec.Encode(image)
+			fakeClient.WatchResponse <- &etcd.Response{
+				Action: "set",
+				Node: &etcd.Node{
+					Value: string(imageBytes),
+				},
+			}
+
+			select {
+			case event, ok := <-watching.ResultChan():
+				if !ok {
+					t.Errorf("watching channel should be open")
+				}
+				if !tt.expected[testIndex] {
+					t.Errorf("unexpected image returned from watch: %#v", event.Object)
+				}
+				if e, a := watch.Added, event.Type; e != a {
+					t.Errorf("Expected %v, got %v", e, a)
+				}
+				image.DockerImageMetadataVersion = "1.0"
+				if e, a := image, event.Object; !reflect.DeepEqual(e, a) {
+					t.Errorf("Objects did not match: %s", util.ObjectDiff(e, a))
+				}
+			case <-time.After(50 * time.Millisecond):
+				if tt.expected[testIndex] {
+					t.Errorf("Expected image %#v to be returned from watch", image)
+				}
+			}
+		}
+
+		select {
+		case _, ok := <-watching.ResultChan():
+			if !ok {
+				t.Errorf("watching channel should be open")
+			}
+		default:
+		}
+
+		fakeClient.WatchInjectError <- nil
+		if _, ok := <-watching.ResultChan(); ok {
+			t.Errorf("watching channel should be closed")
+		}
+		watching.Stop()
+	}
+}
+
 func TestEtcdListImagesRepositoriesEmpty(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	key := "/imageRepositories"
+	key := makeTestDefaultImageRepositoriesListKey()
 	fakeClient.Data[key] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: &etcd.Node{
@@ -289,7 +468,7 @@ func TestEtcdListImagesRepositoriesEmpty(t *testing.T) {
 		E: nil,
 	}
 	registry := NewTestEtcd(fakeClient)
-	repos, err := registry.ListImageRepositories(labels.Everything())
+	repos, err := registry.ListImageRepositories(kapi.NewDefaultContext(), labels.Everything())
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -301,7 +480,7 @@ func TestEtcdListImagesRepositoriesEmpty(t *testing.T) {
 
 func TestEtcdListImageRepositoriesError(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	key := "/imageRepositories"
+	key := makeTestDefaultImageRepositoriesListKey()
 	fakeClient.Data[key] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: nil,
@@ -309,7 +488,7 @@ func TestEtcdListImageRepositoriesError(t *testing.T) {
 		E: fmt.Errorf("some error"),
 	}
 	registry := NewTestEtcd(fakeClient)
-	repos, err := registry.ListImageRepositories(labels.Everything())
+	repos, err := registry.ListImageRepositories(kapi.NewDefaultContext(), labels.Everything())
 	if err == nil {
 		t.Error("unexpected nil error")
 	}
@@ -321,16 +500,16 @@ func TestEtcdListImageRepositoriesError(t *testing.T) {
 
 func TestEtcdListImageRepositoriesEverything(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	key := "/imageRepositories"
+	key := makeTestDefaultImageRepositoriesListKey()
 	fakeClient.Data[key] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: &etcd.Node{
 				Nodes: []*etcd.Node{
 					{
-						Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{JSONBase: kubeapi.JSONBase{ID: "foo"}}),
+						Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{ObjectMeta: kapi.ObjectMeta{Name: "foo"}}),
 					},
 					{
-						Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{JSONBase: kubeapi.JSONBase{ID: "bar"}}),
+						Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{ObjectMeta: kapi.ObjectMeta{Name: "bar"}}),
 					},
 				},
 			},
@@ -338,33 +517,38 @@ func TestEtcdListImageRepositoriesEverything(t *testing.T) {
 		E: nil,
 	}
 	registry := NewTestEtcd(fakeClient)
-	repos, err := registry.ListImageRepositories(labels.Everything())
+	registry.defaultRegistry = testDefaultRegistry
+	repos, err := registry.ListImageRepositories(kapi.NewDefaultContext(), labels.Everything())
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	if len(repos.Items) != 2 || repos.Items[0].ID != "foo" || repos.Items[1].ID != "bar" {
+	if len(repos.Items) != 2 || repos.Items[0].Name != "foo" || repos.Items[1].Name != "bar" || repos.Items[1].Status.DockerImageRepository != "test/default/bar" {
 		t.Errorf("Unexpected images list: %#v", repos)
 	}
 }
 
 func TestEtcdListImageRepositoriesFiltered(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	key := "/imageRepositories"
+	key := makeTestDefaultImageRepositoriesListKey()
 	fakeClient.Data[key] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: &etcd.Node{
 				Nodes: []*etcd.Node{
 					{
 						Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{
-							JSONBase: kubeapi.JSONBase{ID: "foo"},
-							Labels:   map[string]string{"env": "prod"},
+							ObjectMeta: kapi.ObjectMeta{
+								Name:   "foo",
+								Labels: map[string]string{"env": "prod"},
+							},
 						}),
 					},
 					{
 						Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{
-							JSONBase: kubeapi.JSONBase{ID: "bar"},
-							Labels:   map[string]string{"env": "dev"},
+							ObjectMeta: kapi.ObjectMeta{
+								Name:   "bar",
+								Labels: map[string]string{"env": "dev"},
+							},
 						}),
 					},
 				},
@@ -373,40 +557,40 @@ func TestEtcdListImageRepositoriesFiltered(t *testing.T) {
 		E: nil,
 	}
 	registry := NewTestEtcd(fakeClient)
-	repos, err := registry.ListImageRepositories(labels.SelectorFromSet(labels.Set{"env": "dev"}))
+	repos, err := registry.ListImageRepositories(kapi.NewDefaultContext(), labels.SelectorFromSet(labels.Set{"env": "dev"}))
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	if len(repos.Items) != 1 || repos.Items[0].ID != "bar" {
+	if len(repos.Items) != 1 || repos.Items[0].Name != "bar" {
 		t.Errorf("Unexpected repos list: %#v", repos)
 	}
 }
 
 func TestEtcdGetImageRepository(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	fakeClient.Set("/imageRepositories/foo", runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{JSONBase: kubeapi.JSONBase{ID: "foo"}}), 0)
+	fakeClient.Set(makeTestDefaultImageRepositoriesKey("foo"), runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{ObjectMeta: kapi.ObjectMeta{Name: "foo"}}), 0)
 	registry := NewTestEtcd(fakeClient)
-	repo, err := registry.GetImageRepository("foo")
+	repo, err := registry.GetImageRepository(kapi.NewDefaultContext(), "foo")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	if repo.ID != "foo" {
+	if repo.Name != "foo" {
 		t.Errorf("Unexpected repo: %#v", repo)
 	}
 }
 
 func TestEtcdGetImageRepositoryNotFound(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	fakeClient.Data["/imageRepositories/foo"] = tools.EtcdResponseWithError{
+	fakeClient.Data[makeTestDefaultImageRepositoriesKey("foo")] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: nil,
 		},
 		E: tools.EtcdErrorNotFound,
 	}
 	registry := NewTestEtcd(fakeClient)
-	repo, err := registry.GetImageRepository("foo")
+	repo, err := registry.GetImageRepository(kapi.NewDefaultContext(), "foo")
 	if err == nil {
 		t.Errorf("Unexpected non-error.")
 	}
@@ -418,18 +602,18 @@ func TestEtcdGetImageRepositoryNotFound(t *testing.T) {
 func TestEtcdCreateImageRepository(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	fakeClient.TestIndex = true
-	fakeClient.Data["/imageRepositories/foo"] = tools.EtcdResponseWithError{
+	fakeClient.Data[makeTestDefaultImageRepositoriesKey("foo")] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: nil,
 		},
 		E: tools.EtcdErrorNotFound,
 	}
 	registry := NewTestEtcd(fakeClient)
-	err := registry.CreateImageRepository(&api.ImageRepository{
-		JSONBase: kubeapi.JSONBase{
-			ID: "foo",
+	err := registry.CreateImageRepository(kapi.NewDefaultContext(), &api.ImageRepository{
+		ObjectMeta: kapi.ObjectMeta{
+			Name:   "foo",
+			Labels: map[string]string{"a": "b"},
 		},
-		Labels:                map[string]string{"a": "b"},
 		DockerImageRepository: "c/d",
 		Tags: map[string]string{"t1": "v1"},
 	})
@@ -437,7 +621,7 @@ func TestEtcdCreateImageRepository(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	resp, err := fakeClient.Get("/imageRepositories/foo", false, false)
+	resp, err := fakeClient.Get(makeTestDefaultImageRepositoriesKey("foo"), false, false)
 	if err != nil {
 		t.Fatalf("Unexpected error %v", err)
 	}
@@ -447,7 +631,7 @@ func TestEtcdCreateImageRepository(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	if repo.ID != "foo" {
+	if repo.Name != "foo" {
 		t.Errorf("Unexpected repo: %#v %s", repo, resp.Node.Value)
 	}
 
@@ -466,18 +650,18 @@ func TestEtcdCreateImageRepository(t *testing.T) {
 
 func TestEtcdCreateImageRepositoryAlreadyExists(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
-	fakeClient.Data["/imageRepositories/foo"] = tools.EtcdResponseWithError{
+	fakeClient.Data[makeTestDefaultImageRepositoriesKey("foo")] = tools.EtcdResponseWithError{
 		R: &etcd.Response{
 			Node: &etcd.Node{
-				Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{JSONBase: kubeapi.JSONBase{ID: "foo"}}),
+				Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{ObjectMeta: kapi.ObjectMeta{Name: "foo"}}),
 			},
 		},
 		E: nil,
 	}
 	registry := NewTestEtcd(fakeClient)
-	err := registry.CreateImageRepository(&api.ImageRepository{
-		JSONBase: kubeapi.JSONBase{
-			ID: "foo",
+	err := registry.CreateImageRepository(kapi.NewDefaultContext(), &api.ImageRepository{
+		ObjectMeta: kapi.ObjectMeta{
+			Name: "foo",
 		},
 	})
 	if err == nil {
@@ -492,17 +676,17 @@ func TestEtcdUpdateImageRepository(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	fakeClient.TestIndex = true
 
-	resp, _ := fakeClient.Set("/imageRepositories/foo", runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{JSONBase: kubeapi.JSONBase{ID: "foo"}}), 0)
+	resp, _ := fakeClient.Set(makeTestDefaultImageRepositoriesKey("foo"), runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{ObjectMeta: kapi.ObjectMeta{Name: "foo"}}), 0)
 	registry := NewTestEtcd(fakeClient)
-	err := registry.UpdateImageRepository(&api.ImageRepository{
-		JSONBase:              kubeapi.JSONBase{ID: "foo", ResourceVersion: resp.Node.ModifiedIndex},
+	err := registry.UpdateImageRepository(kapi.NewDefaultContext(), &api.ImageRepository{
+		ObjectMeta:            kapi.ObjectMeta{Name: "foo", ResourceVersion: strconv.FormatUint(resp.Node.ModifiedIndex, 10)},
 		DockerImageRepository: "some/repo",
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	repo, err := registry.GetImageRepository("foo")
+	repo, err := registry.GetImageRepository(kapi.NewDefaultContext(), "foo")
 	if repo.DockerImageRepository != "some/repo" {
 		t.Errorf("Unexpected repo: %#v", repo)
 	}
@@ -512,7 +696,7 @@ func TestEtcdDeleteImageRepositoryNotFound(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	fakeClient.Err = tools.EtcdErrorNotFound
 	registry := NewTestEtcd(fakeClient)
-	err := registry.DeleteImageRepository("foo")
+	err := registry.DeleteImageRepository(kapi.NewDefaultContext(), "foo")
 	if err == nil {
 		t.Error("Unexpected non-error")
 	}
@@ -525,7 +709,7 @@ func TestEtcdDeleteImageRepositoryError(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	fakeClient.Err = fmt.Errorf("Some error")
 	registry := NewTestEtcd(fakeClient)
-	err := registry.DeleteImageRepository("foo")
+	err := registry.DeleteImageRepository(kapi.NewDefaultContext(), "foo")
 	if err == nil {
 		t.Error("Unexpected non-error")
 	}
@@ -534,8 +718,8 @@ func TestEtcdDeleteImageRepositoryError(t *testing.T) {
 func TestEtcdDeleteImageRepositoryOK(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	registry := NewTestEtcd(fakeClient)
-	key := "/imageRepositories/foo"
-	err := registry.DeleteImageRepository("foo")
+	key := makeTestDefaultImageRepositoriesListKey() + "/foo"
+	err := registry.DeleteImageRepository(kapi.NewDefaultContext(), "foo")
 	if err != nil {
 		t.Errorf("Unexpected error: %#v", err)
 	}
@@ -549,47 +733,306 @@ func TestEtcdDeleteImageRepositoryOK(t *testing.T) {
 func TestEtcdWatchImageRepositories(t *testing.T) {
 	fakeClient := tools.NewFakeEtcdClient(t)
 	registry := NewTestEtcd(fakeClient)
-	filterFields := labels.SelectorFromSet(labels.Set{"ID": "foo"})
 
-	watching, err := registry.WatchImageRepositories(1, func(repo *api.ImageRepository) bool {
-		fields := labels.Set{
-			"ID": repo.ID,
-		}
-		return filterFields.Matches(fields)
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	fakeClient.WaitForWatchCompletion()
-
-	repo := &api.ImageRepository{JSONBase: kubeapi.JSONBase{ID: "foo"}}
-	repoBytes, _ := latest.Codec.Encode(repo)
-	fakeClient.WatchResponse <- &etcd.Response{
-		Action: "set",
-		Node: &etcd.Node{
-			Value: string(repoBytes),
+	var tests = []struct {
+		label    labels.Selector
+		field    labels.Selector
+		repos    []*api.ImageRepository
+		expected []bool
+	}{
+		// want everything
+		{
+			labels.Everything(),
+			labels.Everything(),
+			[]*api.ImageRepository{
+				{ObjectMeta: kapi.ObjectMeta{Name: "a", Labels: labels.Set{"l1": "v1"}}, DockerImageRepository: "r1"},
+				{ObjectMeta: kapi.ObjectMeta{Name: "b", Labels: labels.Set{"l2": "v2"}}, DockerImageRepository: "r2"},
+				{ObjectMeta: kapi.ObjectMeta{Name: "c", Labels: labels.Set{"l3": "v3"}}, DockerImageRepository: "r3"},
+			},
+			[]bool{
+				true,
+				true,
+				true,
+			},
+		},
+		// want name=foo
+		{
+			labels.Everything(),
+			labels.SelectorFromSet(labels.Set{"name": "foo"}),
+			[]*api.ImageRepository{
+				{ObjectMeta: kapi.ObjectMeta{Name: "a", Labels: labels.Set{"l1": "v1"}}, DockerImageRepository: "r1"},
+				{ObjectMeta: kapi.ObjectMeta{Name: "foo", Labels: labels.Set{"l2": "v2"}}, DockerImageRepository: "r2"},
+				{ObjectMeta: kapi.ObjectMeta{Name: "c", Labels: labels.Set{"l3": "v3"}}, DockerImageRepository: "r3"},
+			},
+			[]bool{
+				false,
+				true,
+				false,
+			},
+		},
+		// want label color:blue
+		{
+			labels.SelectorFromSet(labels.Set{"color": "blue"}),
+			labels.Everything(),
+			[]*api.ImageRepository{
+				{ObjectMeta: kapi.ObjectMeta{Name: "a", Labels: labels.Set{"color": "blue"}}, DockerImageRepository: "r1"},
+				{ObjectMeta: kapi.ObjectMeta{Name: "foo", Labels: labels.Set{"l2": "v2"}}, DockerImageRepository: "r2"},
+				{ObjectMeta: kapi.ObjectMeta{Name: "c", Labels: labels.Set{"color": "blue"}}, DockerImageRepository: "r3"},
+			},
+			[]bool{
+				true,
+				false,
+				true,
+			},
+		},
+		// want name=foo, label color:blue, dockerImageRepository=r1
+		{
+			labels.SelectorFromSet(labels.Set{"color": "blue"}),
+			labels.SelectorFromSet(labels.Set{"dockerImageRepository": "r1", "name": "foo"}),
+			[]*api.ImageRepository{
+				{ObjectMeta: kapi.ObjectMeta{Name: "foo", Labels: labels.Set{"color": "blue"}}, DockerImageRepository: "r1"},
+				{ObjectMeta: kapi.ObjectMeta{Name: "b", Labels: labels.Set{"l2": "v2"}}, DockerImageRepository: "r2"},
+				{ObjectMeta: kapi.ObjectMeta{Name: "c", Labels: labels.Set{"color": "blue"}}, DockerImageRepository: "r3"},
+			},
+			[]bool{
+				true,
+				false,
+				false,
+			},
 		},
 	}
 
-	event := <-watching.ResultChan()
-	if e, a := watch.Added, event.Type; e != a {
-		t.Errorf("Expected %v, got %v", e, a)
-	}
-	if e, a := repo, event.Object; !reflect.DeepEqual(e, a) {
-		t.Errorf("Expected %v, got %v", e, a)
-	}
-
-	select {
-	case _, ok := <-watching.ResultChan():
-		if !ok {
-			t.Errorf("watching channel should be open")
+	for _, tt := range tests {
+		watching, err := registry.WatchImageRepositories(kapi.NewDefaultContext(), tt.label, tt.field, "1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-	default:
+		fakeClient.WaitForWatchCompletion()
+
+		for testIndex, repo := range tt.repos {
+			// Set this value to avoid duplication in tests
+			repo.Status.DockerImageRepository = repo.DockerImageRepository
+			repoBytes, _ := latest.Codec.Encode(repo)
+			fakeClient.WatchResponse <- &etcd.Response{
+				Action: "set",
+				Node: &etcd.Node{
+					Value: string(repoBytes),
+				},
+			}
+
+			select {
+			case event, ok := <-watching.ResultChan():
+				if !ok {
+					t.Errorf("watching channel should be open")
+				}
+				if !tt.expected[testIndex] {
+					t.Errorf("unexpected imageRepository returned from watch: %#v", event.Object)
+				}
+				if e, a := watch.Added, event.Type; e != a {
+					t.Errorf("Expected %v, got %v", e, a)
+				}
+				if e, a := repo, event.Object; !reflect.DeepEqual(e, a) {
+					t.Errorf("Expected %#v, got %#v", e, a)
+				}
+			case <-time.After(50 * time.Millisecond):
+				if tt.expected[testIndex] {
+					t.Errorf("Expected imageRepository %#v to be returned from watch", repo)
+				}
+			}
+		}
+
+		select {
+		case _, ok := <-watching.ResultChan():
+			if !ok {
+				t.Errorf("watching channel should be open")
+			}
+		default:
+		}
+
+		fakeClient.WatchInjectError <- nil
+		if _, ok := <-watching.ResultChan(); ok {
+			t.Errorf("watching channel should be closed")
+		}
+		watching.Stop()
+	}
+}
+
+func TestEtcdCreateImageFailsWithoutNamespace(t *testing.T) {
+	fakeClient := tools.NewFakeEtcdClient(t)
+	fakeClient.TestIndex = true
+	registry := NewTestEtcd(fakeClient)
+	err := registry.CreateImage(kapi.NewContext(), &api.Image{
+		ObjectMeta: kapi.ObjectMeta{
+			Name: "foo",
+		},
+	})
+
+	if err == nil {
+		t.Errorf("expected error that namespace was missing from context")
+	}
+}
+
+func TestEtcdListImagesInDifferentNamespaces(t *testing.T) {
+	fakeClient := tools.NewFakeEtcdClient(t)
+	namespaceAlfa := kapi.WithNamespace(kapi.NewContext(), "alfa")
+	namespaceBravo := kapi.WithNamespace(kapi.NewContext(), "bravo")
+	fakeClient.Data["/images/alfa"] = tools.EtcdResponseWithError{
+		R: &etcd.Response{
+			Node: &etcd.Node{
+				Nodes: []*etcd.Node{
+					{
+						Value: runtime.EncodeOrDie(latest.Codec, &api.Image{ObjectMeta: kapi.ObjectMeta{Name: "foo1"}}),
+					},
+				},
+			},
+		},
+		E: nil,
+	}
+	fakeClient.Data["/images/bravo"] = tools.EtcdResponseWithError{
+		R: &etcd.Response{
+			Node: &etcd.Node{
+				Nodes: []*etcd.Node{
+					{
+						Value: runtime.EncodeOrDie(latest.Codec, &api.Image{ObjectMeta: kapi.ObjectMeta{Name: "foo2"}}),
+					},
+					{
+						Value: runtime.EncodeOrDie(latest.Codec, &api.Image{ObjectMeta: kapi.ObjectMeta{Name: "bar2"}}),
+					},
+				},
+			},
+		},
+		E: nil,
+	}
+	registry := NewTestEtcd(fakeClient)
+
+	buildsAlfa, err := registry.ListImages(namespaceAlfa, labels.Everything())
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(buildsAlfa.Items) != 1 || buildsAlfa.Items[0].Name != "foo1" {
+		t.Errorf("Unexpected builds list: %#v", buildsAlfa)
 	}
 
-	fakeClient.WatchInjectError <- nil
-	if _, ok := <-watching.ResultChan(); ok {
-		t.Errorf("watching channel should be closed")
+	buildsBravo, err := registry.ListImages(namespaceBravo, labels.Everything())
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
 	}
-	watching.Stop()
+	if len(buildsBravo.Items) != 2 || buildsBravo.Items[0].Name != "foo2" || buildsBravo.Items[1].Name != "bar2" {
+		t.Errorf("Unexpected builds list: %#v", buildsBravo)
+	}
+}
+
+func TestEtcdGetImageInDifferentNamespaces(t *testing.T) {
+	fakeClient := tools.NewFakeEtcdClient(t)
+	namespaceAlfa := kapi.WithNamespace(kapi.NewContext(), "alfa")
+	namespaceBravo := kapi.WithNamespace(kapi.NewContext(), "bravo")
+	fakeClient.Set("/images/alfa/foo", runtime.EncodeOrDie(latest.Codec, &api.Image{ObjectMeta: kapi.ObjectMeta{Name: "foo"}}), 0)
+	fakeClient.Set("/images/bravo/foo", runtime.EncodeOrDie(latest.Codec, &api.Image{ObjectMeta: kapi.ObjectMeta{Name: "foo"}}), 0)
+	registry := NewTestEtcd(fakeClient)
+
+	alfaFoo, err := registry.GetImage(namespaceAlfa, "foo")
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if alfaFoo == nil || alfaFoo.Name != "foo" {
+		t.Errorf("Unexpected deployment: %#v", alfaFoo)
+	}
+
+	bravoFoo, err := registry.GetImage(namespaceBravo, "foo")
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if bravoFoo == nil || bravoFoo.Name != "foo" {
+		t.Errorf("Unexpected deployment: %#v", bravoFoo)
+	}
+}
+
+func TestEtcdCreateImageRepositoryFailsWithoutNamespace(t *testing.T) {
+	fakeClient := tools.NewFakeEtcdClient(t)
+	fakeClient.TestIndex = true
+	registry := NewTestEtcd(fakeClient)
+	err := registry.CreateImageRepository(kapi.NewContext(), &api.ImageRepository{
+		ObjectMeta: kapi.ObjectMeta{
+			Name: "foo",
+		},
+	})
+
+	if err == nil {
+		t.Errorf("expected error that namespace was missing from context")
+	}
+}
+
+func TestEtcdListImageRepositoriesInDifferentNamespaces(t *testing.T) {
+	fakeClient := tools.NewFakeEtcdClient(t)
+	namespaceAlfa := kapi.WithNamespace(kapi.NewContext(), "alfa")
+	namespaceBravo := kapi.WithNamespace(kapi.NewContext(), "bravo")
+	fakeClient.Data["/imageRepositories/alfa"] = tools.EtcdResponseWithError{
+		R: &etcd.Response{
+			Node: &etcd.Node{
+				Nodes: []*etcd.Node{
+					{
+						Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{ObjectMeta: kapi.ObjectMeta{Name: "foo1"}}),
+					},
+				},
+			},
+		},
+		E: nil,
+	}
+	fakeClient.Data["/imageRepositories/bravo"] = tools.EtcdResponseWithError{
+		R: &etcd.Response{
+			Node: &etcd.Node{
+				Nodes: []*etcd.Node{
+					{
+						Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{ObjectMeta: kapi.ObjectMeta{Name: "foo2"}}),
+					},
+					{
+						Value: runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{ObjectMeta: kapi.ObjectMeta{Name: "bar2"}}),
+					},
+				},
+			},
+		},
+		E: nil,
+	}
+	registry := NewTestEtcd(fakeClient)
+
+	imageRepositoriesAlfa, err := registry.ListImageRepositories(namespaceAlfa, labels.Everything())
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(imageRepositoriesAlfa.Items) != 1 || imageRepositoriesAlfa.Items[0].Name != "foo1" {
+		t.Errorf("Unexpected imageRepository list: %#v", imageRepositoriesAlfa)
+	}
+
+	imageRepositoriesBravo, err := registry.ListImageRepositories(namespaceBravo, labels.Everything())
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(imageRepositoriesBravo.Items) != 2 || imageRepositoriesBravo.Items[0].Name != "foo2" || imageRepositoriesBravo.Items[1].Name != "bar2" {
+		t.Errorf("Unexpected imageRepository list: %#v", imageRepositoriesBravo)
+	}
+}
+
+func TestEtcdGetImageRepositoryInDifferentNamespaces(t *testing.T) {
+	fakeClient := tools.NewFakeEtcdClient(t)
+	namespaceAlfa := kapi.WithNamespace(kapi.NewContext(), "alfa")
+	namespaceBravo := kapi.WithNamespace(kapi.NewContext(), "bravo")
+	fakeClient.Set("/imageRepositories/alfa/foo", runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{ObjectMeta: kapi.ObjectMeta{Name: "foo"}}), 0)
+	fakeClient.Set("/imageRepositories/bravo/foo", runtime.EncodeOrDie(latest.Codec, &api.ImageRepository{ObjectMeta: kapi.ObjectMeta{Name: "foo"}}), 0)
+	registry := NewTestEtcd(fakeClient)
+
+	alfaFoo, err := registry.GetImageRepository(namespaceAlfa, "foo")
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if alfaFoo == nil || alfaFoo.Name != "foo" {
+		t.Errorf("Unexpected deployment: %#v", alfaFoo)
+	}
+
+	bravoFoo, err := registry.GetImageRepository(namespaceBravo, "foo")
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if bravoFoo == nil || bravoFoo.Name != "foo" {
+		t.Errorf("Unexpected deployment: %#v", bravoFoo)
+	}
 }

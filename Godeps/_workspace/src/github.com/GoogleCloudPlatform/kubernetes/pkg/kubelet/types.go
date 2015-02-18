@@ -18,17 +18,13 @@ package kubelet
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/golang/glog"
 )
 
-// Pod represents the structure of a pod on the Kubelet, distinct from the apiserver
-// representation of a Pod.
-type Pod struct {
-	Namespace string
-	Name      string
-	Manifest  api.ContainerManifest
-}
+const ConfigSourceAnnotationKey = "kubernetes.io/config.source"
 
 // PodOperation defines what changes will be made on a pod configuration.
 type PodOperation int
@@ -42,19 +38,55 @@ const (
 	REMOVE
 	// Pods with the given ids have been updated in this source
 	UPDATE
+
+	// These constants identify the sources of pods
+	// Updates from a file
+	FileSource = "file"
+	// Updates from etcd
+	EtcdSource = "etcd"
+	// Updates from querying a web page
+	HTTPSource = "http"
+	// Updates received to the kubelet server
+	ServerSource = "server"
+	// Updates from Kubernetes API Server
+	ApiserverSource = "api"
+	// Updates from all sources
+	AllSource = "*"
 )
 
 // PodUpdate defines an operation sent on the channel. You can add or remove single services by
 // sending an array of size one and Op == ADD|REMOVE (with REMOVE, only the ID is required).
 // For setting the state of the system to a given state for this source configuration, set
 // Pods as desired and Op to SET, which will reset the system state to that specified in this
-// operation for this source channel. To remove all pods, set Pods to empty array and Op to SET.
+// operation for this source channel. To remove all pods, set Pods to empty object and Op to SET.
+//
+// Additionally, Pods should never be nil - it should always point to an empty slice. While
+// functionally similar, this helps our unit tests properly check that the correct PodUpdates
+// are generated.
 type PodUpdate struct {
-	Pods []Pod
-	Op   PodOperation
+	Pods   []api.BoundPod
+	Op     PodOperation
+	Source string
 }
 
-// GetPodFullName returns a name that full identifies a pod across all config sources.
-func GetPodFullName(pod *Pod) string {
-	return fmt.Sprintf("%s.%s", pod.Name, pod.Namespace)
+// GetPodFullName returns a name that uniquely identifies a pod across all config sources.
+func GetPodFullName(pod *api.BoundPod) string {
+	return fmt.Sprintf("%s.%s.%s", pod.Name, pod.Namespace, pod.Annotations[ConfigSourceAnnotationKey])
+}
+
+// ParsePodFullName unpacks a pod full name and returns the pod name, namespace, and annotations.
+// If the pod full name is invalid, empty strings are returend.
+func ParsePodFullName(podFullName string) (podName, podNamespace string, podAnnotations map[string]string) {
+	parts := strings.Split(podFullName, ".")
+	expectedNumFields := 3
+	actualNumFields := len(parts)
+	if actualNumFields != expectedNumFields {
+		glog.Errorf("found a podFullName (%q) with too few fields: expected %d, actual %d.", podFullName, expectedNumFields, actualNumFields)
+		return
+	}
+	podName = parts[0]
+	podNamespace = parts[1]
+	podAnnotations = make(map[string]string)
+	podAnnotations[ConfigSourceAnnotationKey] = parts[2]
+	return
 }

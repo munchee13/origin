@@ -19,39 +19,61 @@ package apiserver
 import (
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
-	"strconv"
 	"strings"
+	"time"
 
-	"code.google.com/p/go.net/websocket"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/httplog"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 	watchjson "github.com/GoogleCloudPlatform/kubernetes/pkg/watch/json"
+
+	"github.com/golang/glog"
+	"golang.org/x/net/websocket"
 )
 
 type WatchHandler struct {
 	storage map[string]RESTStorage
 	codec   runtime.Codec
+	prefix  string
+	linker  runtime.SelfLinker
+	info    *APIRequestInfoResolver
 }
 
-func getWatchParams(query url.Values) (label, field labels.Selector, resourceVersion uint64) {
-	if s, err := labels.ParseSelector(query.Get("labels")); err != nil {
-		label = labels.Everything()
-	} else {
-		label = s
+// setSelfLinkAddName sets the self link, appending the object's name to the canonical path & type.
+func (h *WatchHandler) setSelfLinkAddName(obj runtime.Object, req *http.Request) error {
+	name, err := h.linker.Name(obj)
+	if err != nil {
+		return err
 	}
-	if s, err := labels.ParseSelector(query.Get("fields")); err != nil {
-		field = labels.Everything()
-	} else {
-		field = s
+	newURL := *req.URL
+	newURL.Path = path.Join(h.prefix, req.URL.Path, name)
+	newURL.RawQuery = ""
+	newURL.Fragment = ""
+	return h.linker.SetSelfLink(obj, newURL.String())
+}
+
+func getWatchParams(query url.Values) (label, field labels.Selector, resourceVersion string, err error) {
+	s, perr := labels.ParseSelector(query.Get("labels"))
+	if perr != nil {
+		err = perr
+		return
 	}
-	if rv, err := strconv.ParseUint(query.Get("resourceVersion"), 10, 64); err == nil {
-		resourceVersion = rv
+	label = s
+
+	s, perr = labels.ParseSelector(query.Get("fields"))
+	if perr != nil {
+		err = perr
+		return
 	}
-	return label, field, resourceVersion
+	field = s
+
+	resourceVersion = query.Get("resourceVersion")
+	return
 }
 
 var connectionUpgradeRegex = regexp.MustCompile("(^|.*,\\s*)upgrade($|\\s*,)")
@@ -62,43 +84,71 @@ func isWebsocketRequest(req *http.Request) bool {
 
 // ServeHTTP processes watch requests.
 func (h *WatchHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	ctx := api.NewContext()
-	parts := splitPath(req.URL.Path)
-	if len(parts) < 1 || req.Method != "GET" {
+	var verb string
+	var apiResource string
+	var httpCode int
+	reqStart := time.Now()
+	defer func() { monitor("watch", verb, apiResource, httpCode, reqStart) }()
+
+	if req.Method != "GET" {
 		notFound(w, req)
+		httpCode = http.StatusNotFound
 		return
 	}
-	storage := h.storage[parts[0]]
+
+	requestInfo, err := h.info.GetAPIRequestInfo(req)
+	if err != nil {
+		notFound(w, req)
+		httpCode = http.StatusNotFound
+		return
+	}
+	verb = requestInfo.Verb
+	ctx := api.WithNamespace(api.NewContext(), requestInfo.Namespace)
+
+	storage := h.storage[requestInfo.Resource]
 	if storage == nil {
 		notFound(w, req)
+		httpCode = http.StatusNotFound
 		return
 	}
-	if watcher, ok := storage.(ResourceWatcher); ok {
-		label, field, resourceVersion := getWatchParams(req.URL.Query())
-		watching, err := watcher.Watch(ctx, label, field, resourceVersion)
-		if err != nil {
-			errorJSON(err, h.codec, w)
-			return
-		}
-
-		// TODO: This is one watch per connection. We want to multiplex, so that
-		// multiple watches of the same thing don't create two watches downstream.
-		watchServer := &WatchServer{watching, h.codec}
-		if isWebsocketRequest(req) {
-			websocket.Handler(watchServer.HandleWS).ServeHTTP(httplog.Unlogged(w), req)
-		} else {
-			watchServer.ServeHTTP(w, req)
-		}
+	apiResource = requestInfo.Resource
+	watcher, ok := storage.(ResourceWatcher)
+	if !ok {
+		httpCode = errorJSON(errors.NewMethodNotSupported(requestInfo.Resource, "watch"), h.codec, w)
 		return
 	}
 
-	notFound(w, req)
+	label, field, resourceVersion, err := getWatchParams(req.URL.Query())
+	if err != nil {
+		httpCode = errorJSON(err, h.codec, w)
+		return
+	}
+	watching, err := watcher.Watch(ctx, label, field, resourceVersion)
+	if err != nil {
+		httpCode = errorJSON(err, h.codec, w)
+		return
+	}
+	httpCode = http.StatusOK
+
+	// TODO: This is one watch per connection. We want to multiplex, so that
+	// multiple watches of the same thing don't create two watches downstream.
+	watchServer := &WatchServer{watching, h.codec, func(obj runtime.Object) {
+		if err := h.setSelfLinkAddName(obj, req); err != nil {
+			glog.Errorf("Failed to set self link for object %#v", obj)
+		}
+	}}
+	if isWebsocketRequest(req) {
+		websocket.Handler(watchServer.HandleWS).ServeHTTP(httplog.Unlogged(w), req)
+	} else {
+		watchServer.ServeHTTP(w, req)
+	}
 }
 
 // WatchServer serves a watch.Interface over a websocket or vanilla HTTP.
 type WatchServer struct {
 	watching watch.Interface
 	codec    runtime.Codec
+	fixup    func(runtime.Object)
 }
 
 // HandleWS implements a websocket handler.
@@ -121,6 +171,7 @@ func (w *WatchServer) HandleWS(ws *websocket.Conn) {
 				// End of results.
 				return
 			}
+			w.fixup(event.Object)
 			obj, err := watchjson.Object(w.codec, &event)
 			if err != nil {
 				// Client disconnect.
@@ -170,6 +221,7 @@ func (self *WatchServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				// End of results.
 				return
 			}
+			self.fixup(event.Object)
 			if err := encoder.Encode(&event); err != nil {
 				// Client disconnect.
 				self.watching.Stop()

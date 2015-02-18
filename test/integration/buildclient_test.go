@@ -5,122 +5,232 @@ package integration
 import (
 	"net/http"
 	"net/http/httptest"
-	"reflect"
+	"sync"
 	"testing"
 
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	klatest "github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	kclient "github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/master"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/version"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/admit"
 
 	"github.com/openshift/origin/pkg/api/latest"
-	"github.com/openshift/origin/pkg/api/v1beta1"
-	"github.com/openshift/origin/pkg/build/api"
+	buildapi "github.com/openshift/origin/pkg/build/api"
+	buildclient "github.com/openshift/origin/pkg/build/client"
+	buildcontrollerfactory "github.com/openshift/origin/pkg/build/controller/factory"
+	buildstrategy "github.com/openshift/origin/pkg/build/controller/strategy"
 	buildregistry "github.com/openshift/origin/pkg/build/registry/build"
 	buildconfigregistry "github.com/openshift/origin/pkg/build/registry/buildconfig"
 	buildetcd "github.com/openshift/origin/pkg/build/registry/etcd"
+	"github.com/openshift/origin/pkg/build/webhook"
+	"github.com/openshift/origin/pkg/build/webhook/github"
 	osclient "github.com/openshift/origin/pkg/client"
+	imageetcd "github.com/openshift/origin/pkg/image/registry/etcd"
+	"github.com/openshift/origin/pkg/image/registry/imagerepository"
 )
 
 func init() {
 	requireEtcd()
 }
 
-func TestBuildClient(t *testing.T) {
-	etcdClient := newEtcdClient()
-	helper, _ := master.NewEtcdHelper(etcdClient.GetCluster(), klatest.Version)
-	m := master.New(&master.Config{
-		EtcdHelper: helper,
-	})
-	interfaces, _ := latest.InterfacesFor(latest.Version)
-	buildRegistry := buildetcd.New(tools.EtcdHelper{etcdClient, interfaces.Codec, interfaces.ResourceVersioner})
-	storage := map[string]apiserver.RESTStorage{
-		"builds":       buildregistry.NewREST(buildRegistry),
-		"buildConfigs": buildconfigregistry.NewREST(buildRegistry),
-	}
+func TestListBuilds(t *testing.T) {
 
-	osMux := http.NewServeMux()
-	apiserver.NewAPIGroup(m.API_v1beta1()).InstallREST(osMux, "/api/v1beta1")
-	apiserver.NewAPIGroup(storage, v1beta1.Codec, "/osapi/v1beta1", interfaces.SelfLinker).InstallREST(osMux, "/osapi/v1beta1")
-	apiserver.InstallSupport(osMux)
-	s := httptest.NewServer(osMux)
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
 
-	kubeclient := client.NewOrDie(&client.Config{Host: s.URL, Version: klatest.Version})
-	osClient := osclient.NewOrDie(&client.Config{Host: s.URL, Version: latest.Version})
-
-	info, err := kubeclient.ServerVersion()
+	builds, err := openshift.Client.Builds(testNamespace).List(labels.Everything(), labels.Everything())
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if e, a := version.Get(), *info; !reflect.DeepEqual(e, a) {
-		t.Errorf("expected %#v, got %#v", e, a)
-	}
-
-	builds, err := osClient.ListBuilds(labels.Everything())
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
+		t.Fatalf("Unexpected error %v", err)
 	}
 	if len(builds.Items) != 0 {
-		t.Errorf("expected no builds, got %#v", builds)
+		t.Errorf("Expected no builds, got %#v", builds.Items)
 	}
+}
 
-	// get a validation error
-	build := &api.Build{
-		Labels: map[string]string{
-			"label1": "value1",
-			"label2": "value2",
-		},
-		Input: api.BuildInput{
-			Type:         api.DockerBuildType,
-			SourceURI:    "http://my.docker/build",
-			ImageTag:     "namespace/builtimage",
-			BuilderImage: "anImage",
-		},
-	}
-	got, err := osClient.CreateBuild(build)
-	if err == nil {
-		t.Fatalf("unexpected non-error: %v", err)
-	}
+func TestCreateBuild(t *testing.T) {
 
-	// get a created build
-	build.Input.BuilderImage = ""
-	got, err = osClient.CreateBuild(build)
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+	build := mockBuild()
+
+	expected, err := openshift.Client.Builds(testNamespace).Create(build)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Unexpected error: %v", err)
 	}
-	if got.ID == "" {
-		t.Errorf("unexpected empty build ID %v", got)
+	if expected.Name == "" {
+		t.Errorf("Unexpected empty build Name %v", expected)
 	}
 
-	// get a list of builds
-	builds, err = osClient.ListBuilds(labels.Everything())
+	builds, err := openshift.Client.Builds(testNamespace).List(labels.Everything(), labels.Everything())
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Unexpected error %v", err)
 	}
 	if len(builds.Items) != 1 {
-		t.Errorf("expected one build, got %#v", builds)
+		t.Errorf("Expected one build, got %#v", builds.Items)
 	}
-	actual := builds.Items[0]
-	if actual.ID != got.ID {
-		t.Errorf("expected build %#v, got %#v", got, actual)
+}
+
+func TestDeleteBuild(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+	build := mockBuild()
+
+	actual, err := openshift.Client.Builds(testNamespace).Create(build)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
 	}
-	if actual.Status != api.BuildNew {
-		t.Errorf("expected build status to be BuildNew, got %s", actual.Status)
+	if err := openshift.Client.Builds(testNamespace).Delete(actual.Name); err != nil {
+		t.Fatalf("Unxpected error: %v", err)
+	}
+}
+
+func TestWatchBuilds(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+	build := mockBuild()
+
+	watch, err := openshift.Client.Builds(testNamespace).Watch(labels.Everything(), labels.Everything(), "0")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer watch.Stop()
+
+	expected, err := openshift.Client.Builds(testNamespace).Create(build)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	// delete a build
-	err = osClient.DeleteBuild(got.ID)
+	event := <-watch.ResultChan()
+	actual := event.Object.(*buildapi.Build)
+
+	if e, a := expected.Name, actual.Name; e != a {
+		t.Errorf("Expected build Name %s, got %s", e, a)
+	}
+}
+
+func mockBuild() *buildapi.Build {
+	return &buildapi.Build{
+		ObjectMeta: kapi.ObjectMeta{
+			Labels: map[string]string{
+				"label1": "value1",
+				"label2": "value2",
+			},
+		},
+		Parameters: buildapi.BuildParameters{
+			Source: buildapi.BuildSource{
+				Type: buildapi.BuildSourceGit,
+				Git: &buildapi.GitBuildSource{
+					URI: "http://my.docker/build",
+				},
+			},
+			Strategy: buildapi.BuildStrategy{
+				Type: buildapi.DockerBuildStrategyType,
+				DockerStrategy: &buildapi.DockerBuildStrategy{
+					ContextDir: "context",
+				},
+			},
+			Output: buildapi.BuildOutput{
+				DockerImageReference: "namespace/builtimage",
+			},
+		},
+	}
+}
+
+type testBuildOpenshift struct {
+	Client   *osclient.Client
+	server   *httptest.Server
+	whPrefix string
+	stop     chan struct{}
+	lock     sync.Mutex
+}
+
+func NewTestBuildOpenshift(t *testing.T) *testBuildOpenshift {
+	openshift := &testBuildOpenshift{
+		stop: make(chan struct{}),
+	}
+
+	openshift.lock.Lock()
+	defer openshift.lock.Unlock()
+	etcdClient := newEtcdClient()
+	etcdHelper, _ := master.NewEtcdHelper(etcdClient, klatest.Version)
+
+	osMux := http.NewServeMux()
+	openshift.server = httptest.NewServer(osMux)
+
+	kubeClient := client.NewOrDie(&client.Config{Host: openshift.server.URL, Version: klatest.Version})
+	osClient := osclient.NewOrDie(&client.Config{Host: openshift.server.URL, Version: latest.Version})
+
+	openshift.Client = osClient
+
+	kubeletClient, err := kclient.NewKubeletClient(&kclient.KubeletConfig{Port: 10250})
 	if err != nil {
-		t.Fatalf("unexpected error %v", err)
+		t.Fatalf("Unable to configure Kubelet client: %v", err)
 	}
-	builds, err = osClient.ListBuilds(labels.Everything())
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
+
+	handlerContainer := master.NewHandlerContainer(osMux)
+
+	_ = master.New(&master.Config{
+		Client:           kubeClient,
+		EtcdHelper:       etcdHelper,
+		KubeletClient:    kubeletClient,
+		APIPrefix:        "/api",
+		AdmissionControl: admit.NewAlwaysAdmit(),
+		RestfulContainer: handlerContainer,
+	})
+
+	interfaces, _ := latest.InterfacesFor(latest.Version)
+
+	buildEtcd := buildetcd.New(etcdHelper)
+	imageEtcd := imageetcd.New(etcdHelper, imageetcd.DefaultRegistryFunc(func() (string, bool) { return "registry:3000", true }))
+
+	storage := map[string]apiserver.RESTStorage{
+		"builds":            buildregistry.NewREST(buildEtcd),
+		"buildConfigs":      buildconfigregistry.NewREST(buildEtcd),
+		"imageRepositories": imagerepository.NewREST(imageEtcd),
 	}
-	if len(builds.Items) != 0 {
-		t.Errorf("expected no builds, got %#v", builds)
+
+	apiserver.NewAPIGroupVersion(storage, latest.Codec, "/osapi", "v1beta1", interfaces.MetadataAccessor, admit.NewAlwaysAdmit(), kapi.NewRequestContextMapper(), latest.RESTMapper).InstallREST(handlerContainer, "/osapi", "v1beta1")
+
+	openshift.whPrefix = "/osapi/v1beta1/buildConfigHooks/"
+	osMux.Handle(openshift.whPrefix, http.StripPrefix(openshift.whPrefix,
+		webhook.NewController(buildclient.NewOSClientBuildConfigClient(osClient), buildclient.NewOSClientBuildClient(osClient), osClient.ImageRepositories(kapi.NamespaceAll).(osclient.ImageRepositoryNamespaceGetter), map[string]webhook.Plugin{
+			"github": github.New(),
+		})))
+
+	factory := buildcontrollerfactory.BuildControllerFactory{
+		OSClient:     osClient,
+		KubeClient:   kubeClient,
+		BuildUpdater: buildclient.NewOSClientBuildClient(osClient),
+		DockerBuildStrategy: &buildstrategy.DockerBuildStrategy{
+			Image:          "test-docker-builder",
+			UseLocalImages: false,
+			Codec:          latest.Codec,
+		},
+		STIBuildStrategy: &buildstrategy.STIBuildStrategy{
+			Image:                "test-sti-builder",
+			TempDirectoryCreator: buildstrategy.STITempDirectoryCreator,
+			UseLocalImages:       false,
+			Codec:                latest.Codec,
+		},
+		Stop: openshift.stop,
 	}
+
+	factory.Create().Run()
+
+	return openshift
+}
+
+func (t *testBuildOpenshift) Close() {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	close(t.stop)
+	t.server.CloseClientConnections()
+	t.server.Close()
 }

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/golang/glog"
 )
 
@@ -45,9 +46,14 @@ const (
 	// ValidationErrorTypeNotSupported is used to report valid (as per formatting rules)
 	// values that can not be handled (e.g. an enumerated string).
 	ValidationErrorTypeNotSupported ValidationErrorType = "FieldValueNotSupported"
+	// ValidationErrorTypeForbidden is used to report valid (as per formatting rules)
+	// values which would be accepted by some api instances, but which would invoke behavior
+	// not permitted by this api instance (such as due to stricter security policy).
+	ValidationErrorTypeForbidden ValidationErrorType = "FieldValueForbidden"
 )
 
-func ValueOf(t ValidationErrorType) string {
+// String converts a ValidationErrorType into its corresponding error message.
+func (t ValidationErrorType) String() string {
 	switch t {
 	case ValidationErrorTypeNotFound:
 		return "not found"
@@ -59,6 +65,8 @@ func ValueOf(t ValidationErrorType) string {
 		return "invalid value"
 	case ValidationErrorTypeNotSupported:
 		return "unsupported value"
+	case ValidationErrorTypeForbidden:
+		return "forbidden"
 	default:
 		glog.Errorf("unrecognized validation type: %#v", t)
 		return ""
@@ -70,72 +78,63 @@ type ValidationError struct {
 	Type     ValidationErrorType
 	Field    string
 	BadValue interface{}
+	Detail   string
 }
 
-func (v ValidationError) Error() string {
-	return fmt.Sprintf("%s: %v '%v'", v.Field, ValueOf(v.Type), v.BadValue)
-}
+var _ error = &ValidationError{}
 
-// NewFieldRequired returns a ValidationError indicating "value required"
-func NewFieldRequired(field string, value interface{}) ValidationError {
-	return ValidationError{ValidationErrorTypeRequired, field, value}
-}
-
-// NewFieldInvalid returns a ValidationError indicating "invalid value"
-func NewFieldInvalid(field string, value interface{}) ValidationError {
-	return ValidationError{ValidationErrorTypeInvalid, field, value}
-}
-
-// NewFieldNotSupported returns a ValidationError indicating "unsupported value"
-func NewFieldNotSupported(field string, value interface{}) ValidationError {
-	return ValidationError{ValidationErrorTypeNotSupported, field, value}
-}
-
-// NewFieldDuplicate returns a ValidationError indicating "duplicate value"
-func NewFieldDuplicate(field string, value interface{}) ValidationError {
-	return ValidationError{ValidationErrorTypeDuplicate, field, value}
-}
-
-// NewFieldNotFound returns a ValidationError indicating "value not found"
-func NewFieldNotFound(field string, value interface{}) ValidationError {
-	return ValidationError{ValidationErrorTypeNotFound, field, value}
-}
-
-// ErrorList is a collection of errors.  This does not implement the error
-// interface to avoid confusion where an empty ErrorList would still be an
-// error (non-nil).  To produce a single error instance from an ErrorList, use
-// the ToError() method, which will return nil for an empty ErrorList.
-type ErrorList []error
-
-// This helper implements the error interface for ErrorList, but prevents
-// accidental conversion of ErrorList to error.
-type errorListInternal ErrorList
-
-// Error is part of the error interface.
-func (list errorListInternal) Error() string {
-	if len(list) == 0 {
-		return ""
+func (v *ValidationError) Error() string {
+	var s string
+	switch v.Type {
+	case ValidationErrorTypeRequired:
+		s = spew.Sprintf("%s: %s", v.Field, v.Type)
+	default:
+		s = spew.Sprintf("%s: %s '%+v'", v.Field, v.Type, v.BadValue)
 	}
-	sl := make([]string, len(list))
+	if len(v.Detail) != 0 {
+		s += fmt.Sprintf(": %s", v.Detail)
+	}
+	return s
+}
+
+// NewFieldRequired returns a *ValidationError indicating "value required"
+// TODO: remove "value"
+func NewFieldRequired(field string, value interface{}) *ValidationError {
+	return &ValidationError{ValidationErrorTypeRequired, field, value, ""}
+}
+
+// NewFieldInvalid returns a *ValidationError indicating "invalid value"
+func NewFieldInvalid(field string, value interface{}, detail string) *ValidationError {
+	return &ValidationError{ValidationErrorTypeInvalid, field, value, detail}
+}
+
+// NewFieldNotSupported returns a *ValidationError indicating "unsupported value"
+func NewFieldNotSupported(field string, value interface{}) *ValidationError {
+	return &ValidationError{ValidationErrorTypeNotSupported, field, value, ""}
+}
+
+// NewFieldForbidden returns a *ValidationError indicating "forbidden"
+func NewFieldForbidden(field string, value interface{}) *ValidationError {
+	return &ValidationError{ValidationErrorTypeForbidden, field, value, ""}
+}
+
+// NewFieldDuplicate returns a *ValidationError indicating "duplicate value"
+func NewFieldDuplicate(field string, value interface{}) *ValidationError {
+	return &ValidationError{ValidationErrorTypeDuplicate, field, value, ""}
+}
+
+// NewFieldNotFound returns a *ValidationError indicating "value not found"
+func NewFieldNotFound(field string, value interface{}) *ValidationError {
+	return &ValidationError{ValidationErrorTypeNotFound, field, value, ""}
+}
+
+type ValidationErrorList []error
+
+// Prefix adds a prefix to the Field of every ValidationError in the list.
+// Returns the list for convenience.
+func (list ValidationErrorList) Prefix(prefix string) ValidationErrorList {
 	for i := range list {
-		sl[i] = list[i].Error()
-	}
-	return strings.Join(sl, "; ")
-}
-
-// ToError converts an ErrorList into a "normal" error, or nil if the list is empty.
-func (list ErrorList) ToError() error {
-	if len(list) == 0 {
-		return nil
-	}
-	return errorListInternal(list)
-}
-
-// Prefix adds a prefix to the Field of every ValidationError in the list. Returns
-// the list for convenience.
-func (list ErrorList) Prefix(prefix string) ErrorList {
-	for i := range list {
-		if err, ok := list[i].(ValidationError); ok {
+		if err, ok := list[i].(*ValidationError); ok {
 			if strings.HasPrefix(err.Field, "[") {
 				err.Field = prefix + err.Field
 			} else if len(err.Field) != 0 {
@@ -144,13 +143,15 @@ func (list ErrorList) Prefix(prefix string) ErrorList {
 				err.Field = prefix
 			}
 			list[i] = err
+		} else {
+			glog.Warningf("Programmer error: ValidationErrorList holds non-ValidationError: %#v", list[i])
 		}
 	}
 	return list
 }
 
-// PrefixIndex adds an index to the Field of every ValidationError in the list. Returns
-// the list for convenience.
-func (list ErrorList) PrefixIndex(index int) ErrorList {
+// PrefixIndex adds an index to the Field of every ValidationError in the list.
+// Returns the list for convenience.
+func (list ValidationErrorList) PrefixIndex(index int) ValidationErrorList {
 	return list.Prefix(fmt.Sprintf("[%d]", index))
 }

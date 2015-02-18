@@ -18,11 +18,9 @@ package binding
 
 import (
 	"fmt"
+	"net/http"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
 
@@ -40,41 +38,19 @@ func NewREST(bindingRegistry Registry) *REST {
 	}
 }
 
-// List returns an error because bindings are write-only objects.
-func (*REST) List(ctx api.Context, label, field labels.Selector) (runtime.Object, error) {
-	return nil, errors.NewNotFound("binding", "list")
-}
-
-// Get returns an error because bindings are write-only objects.
-func (*REST) Get(ctx api.Context, id string) (runtime.Object, error) {
-	return nil, errors.NewNotFound("binding", id)
-}
-
-// Delete returns an error because bindings are write-only objects.
-func (*REST) Delete(ctx api.Context, id string) (<-chan runtime.Object, error) {
-	return nil, errors.NewNotFound("binding", id)
-}
-
 // New returns a new binding object fit for having data unmarshalled into it.
 func (*REST) New() runtime.Object {
 	return &api.Binding{}
 }
 
 // Create attempts to make the assignment indicated by the binding it recieves.
-func (b *REST) Create(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error) {
+func (b *REST) Create(ctx api.Context, obj runtime.Object) (runtime.Object, error) {
 	binding, ok := obj.(*api.Binding)
 	if !ok {
 		return nil, fmt.Errorf("incorrect type: %#v", obj)
 	}
-	return apiserver.MakeAsync(func() (runtime.Object, error) {
-		if err := b.registry.ApplyBinding(ctx, binding); err != nil {
-			return nil, err
-		}
-		return &api.Status{Status: api.StatusSuccess}, nil
-	}), nil
-}
-
-// Update returns an error-- this object may not be updated.
-func (b *REST) Update(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error) {
-	return nil, fmt.Errorf("Bindings may not be changed.")
+	if err := b.registry.ApplyBinding(ctx, binding); err != nil {
+		return nil, err
+	}
+	return &api.Status{Status: api.StatusSuccess, Code: http.StatusCreated}, nil
 }

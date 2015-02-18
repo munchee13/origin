@@ -11,9 +11,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Commands similar to git, go tools and other modern CLI tools
-// inspired by go, go-Commander, gh and subcommand
-
+//Package cobra is a commander providing a simple interface to create powerful modern CLI interfaces.
+//In addition to providing an interface, Cobra simultaneously provides a controller to organize your application code.
 package cobra
 
 import (
@@ -35,13 +34,15 @@ type Command struct {
 	name string
 	// The one-line usage message.
 	Use string
+	// An array of aliases that can be used instead of the first word in Use.
+	Aliases []string
 	// The short description shown in the 'help' output.
 	Short string
 	// The long message shown in the 'help <this-command>' output.
 	Long string
-	// Set of flags specific to this command.
+	// Full set of flags
 	flags *flag.FlagSet
-	// Set of flags children commands will inherit
+	// Set of flags childrens of this command will inherit
 	pflags *flag.FlagSet
 	// Run runs the command.
 	// The args are the arguments after the command name.
@@ -55,8 +56,9 @@ type Command struct {
 	commandsMaxCommandPathLen int
 
 	flagErrorBuf *bytes.Buffer
+	cmdErrorBuf  *bytes.Buffer
 
-	args          []string
+	args          []string                 // actual args parsed from flags
 	output        *io.Writer               // nil means stderr; use Out() method instead
 	usageFunc     func(*Command) error     // Usage can be defined by application
 	usageTemplate string                   // Can be defined by Application
@@ -139,7 +141,7 @@ func (c *Command) HelpFunc() func(*Command, []string) {
 		return func(c *Command, args []string) {
 			if len(args) == 0 {
 				// Help called without any topic, calling on root
-				c.Root().Usage()
+				c.Root().Help()
 				return
 			}
 
@@ -170,6 +172,7 @@ func (c *Command) UsagePadding() int {
 
 var minCommandPathPadding int = 11
 
+//
 func (c *Command) CommandPathPadding() int {
 	if c.parent == nil || minCommandPathPadding > c.parent.commandsMaxCommandPathLen {
 		return minCommandPathPadding
@@ -189,18 +192,23 @@ func (c *Command) UsageTemplate() string {
 		return `{{ $cmd := . }}
 Usage: {{if .Runnable}}
   {{.UseLine}}{{if .HasFlags}} [flags]{{end}}{{end}}{{if .HasSubCommands}}
-  {{ .CommandPath}} [command]{{end}}
+  {{ .CommandPath}} [command]{{end}}{{if gt .Aliases 0}}
+
+Aliases:
+  {{.NameAndAliases}}{{end}}
 {{ if .HasSubCommands}}
 Available Commands: {{range .Commands}}{{if .Runnable}}
   {{rpad .Use .UsagePadding }} {{.Short}}{{end}}{{end}}
 {{end}}
-{{ if .HasFlags}} Available Flags:
-{{.Flags.FlagUsages}}{{end}}{{if .HasParent}}{{if and (gt .Commands 0) (gt .Parent.Commands 1) }}
+{{ if .HasLocalFlags}}Flags:
+{{.LocalFlags.FlagUsages}}{{end}}
+{{ if .HasAnyPersistentFlags}}Global Flags:
+{{.AllPersistentFlags.FlagUsages}}{{end}}{{if .HasParent}}{{if and (gt .Commands 0) (gt .Parent.Commands 1) }}
 Additional help topics: {{if gt .Commands 0 }}{{range .Commands}}{{if not .Runnable}} {{rpad .CommandPath .CommandPathPadding}} {{.Short}}{{end}}{{end}}{{end}}{{if gt .Parent.Commands 1 }}{{range .Parent.Commands}}{{if .Runnable}}{{if not (eq .Name $cmd.Name) }}{{end}}
   {{rpad .CommandPath .CommandPathPadding}} {{.Short}}{{end}}{{end}}{{end}}{{end}}
-{{end}}
-Use "{{.Root.Name}} help [command]" for more information about that command.
-`
+{{end}}{{ if .HasSubCommands }}
+Use "{{.Root.Name}} help [command]" for more information about a command.
+{{end}}`
 	}
 }
 
@@ -213,7 +221,7 @@ func (c *Command) HelpTemplate() string {
 		return c.parent.HelpTemplate()
 	} else {
 		return `{{.Long | trim}}
-{{if .Runnable}}{{.UsageString}}{{end}}
+{{if or .Runnable .HasSubCommands}}{{.UsageString}}{{end}}
 `
 	}
 }
@@ -283,16 +291,26 @@ func (c *Command) Find(arrs []string) (*Command, []string, error) {
 			if len(argsWOflags) > 0 {
 				matches := make([]*Command, 0)
 				for _, cmd := range c.commands {
-					if cmd.Name() == argsWOflags[0] { // exact name match
-						return innerfind(cmd, argsMinusX(args, cmd.Name()))
-					} else if strings.HasPrefix(cmd.Name(), argsWOflags[0]) { // prefix match
-						matches = append(matches, cmd)
+					if cmd.Name() == argsWOflags[0] || cmd.HasAlias(argsWOflags[0]) { // exact name or alias match
+						return innerfind(cmd, argsMinusX(args, argsWOflags[0]))
+					} else if EnablePrefixMatching {
+						if strings.HasPrefix(cmd.Name(), argsWOflags[0]) { // prefix match
+							matches = append(matches, cmd)
+						}
+						for _, x := range cmd.Aliases {
+							if strings.HasPrefix(x, argsWOflags[0]) {
+								matches = append(matches, cmd)
+							}
+						}
 					}
 				}
 
 				// only accept a single prefix match - multiple matches would be ambiguous
 				if len(matches) == 1 {
 					return innerfind(matches[0], argsMinusX(args, argsWOflags[0]))
+				} else if len(matches) == 0 && len(args) > 0 && args[0] == "help" {
+					// special case help command
+					return innerfind(c, argsMinusX(append(args, "--help"), argsWOflags[0]))
 				}
 			}
 		}
@@ -302,8 +320,9 @@ func (c *Command) Find(arrs []string) (*Command, []string, error) {
 
 	commandFound, a := innerfind(c, arrs)
 
-	// if commander returned and not appropriately matched return nil & error
-	if commandFound.Name() == c.Name() && !strings.HasPrefix(commandFound.Name(), arrs[0]) {
+	// if commander returned and the first argument (if it exists) doesn't
+	// match the command name, return nil & error
+	if commandFound.Name() == c.Name() && len(arrs[0]) > 0 && commandFound.Name() != arrs[0] {
 		return nil, a, fmt.Errorf("unknown command %q\nRun 'help' for usage.\n", a[0])
 	}
 
@@ -328,6 +347,7 @@ func (c *Command) Root() *Command {
 func (c *Command) findAndExecute(args []string) (err error) {
 
 	cmd, a, e := c.Find(args)
+
 	if e != nil {
 		return e
 	}
@@ -342,10 +362,22 @@ func (c *Command) execute(a []string) (err error) {
 	err = c.ParseFlags(a)
 
 	if err != nil {
+		// We're writing subcommand usage to root command's error buffer to have it displayed to the user
+		r := c.Root()
+		if r.cmdErrorBuf == nil {
+			r.cmdErrorBuf = new(bytes.Buffer)
+		}
+		// for writing the usage to the buffer we need to switch the output temporarily
+		// since Out() returns root output, you also need to revert that on root
+		out := r.Out()
+		r.SetOutput(r.cmdErrorBuf)
+		c.Usage()
+		r.SetOutput(out)
 		return err
 	} else {
-		// If help is called, regardless of other flags, we print that
-		if c.helpFlagVal {
+		// If help is called, regardless of other flags, we print that.
+		// Print help also if c.Run is nil.
+		if c.helpFlagVal || !c.Runnable() {
 			c.Help()
 			return nil
 		}
@@ -397,12 +429,14 @@ func (c *Command) Execute() (err error) {
 		args = c.args
 	}
 
+	c.assureHelpFlag()
+
 	if len(args) == 0 {
 		// Only the executable is called and the root is runnable, run it
 		if c.Runnable() {
 			err = c.execute([]string(nil))
 		} else {
-			c.Usage()
+			c.Help()
 		}
 	} else {
 		err = c.findAndExecute(args)
@@ -417,7 +451,12 @@ func (c *Command) Execute() (err error) {
 			// Flags parsing had an error.
 			// If an error happens here, we have to report it to the user
 			c.Println(c.errorMsgFromParse())
-			c.Usage()
+			// If an error happens search also for subcommand info about that
+			if c.cmdErrorBuf != nil && c.cmdErrorBuf.Len() > 0 {
+				c.Println(c.cmdErrorBuf.String())
+			} else {
+				c.Usage()
+			}
 			return e
 		} else {
 			// If help is called, regardless of other flags, we print that
@@ -452,6 +491,10 @@ func (c *Command) Execute() (err error) {
 
 func (c *Command) initHelp() {
 	if c.helpCommand == nil {
+		if !c.HasSubCommands() {
+			return
+		}
+
 		c.helpCommand = &Command{
 			Use:   "help [command]",
 			Short: "Help about any command",
@@ -466,13 +509,17 @@ func (c *Command) initHelp() {
 // Used for testing
 func (c *Command) ResetCommands() {
 	c.commands = nil
+	c.helpCommand = nil
+	c.cmdErrorBuf = new(bytes.Buffer)
+	c.cmdErrorBuf.Reset()
 }
 
+//Commands returns a slice of child commands.
 func (c *Command) Commands() []*Command {
 	return c.commands
 }
 
-// Add one or many commands as children of this
+// AddCommand adds one or more commands to this parent command.
 func (c *Command) AddCommand(cmds ...*Command) {
 	for i, x := range cmds {
 		if cmds[i] == c {
@@ -536,7 +583,7 @@ func (c *Command) UsageString() string {
 	return bb.String()
 }
 
-// The full path to this command
+// CommandPath returns the full path to this command.
 func (c *Command) CommandPath() string {
 	str := c.Name()
 	x := c
@@ -614,6 +661,20 @@ func (c *Command) Name() string {
 	return name
 }
 
+// Determine if a given string is an alias of the command.
+func (c *Command) HasAlias(s string) bool {
+	for _, a := range c.Aliases {
+		if a == s {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Command) NameAndAliases() string {
+	return strings.Join(append([]string{c.Name()}, c.Aliases...), ", ")
+}
+
 // Determine if the command is itself runnable
 func (c *Command) Runnable() bool {
 	return c.Run != nil
@@ -621,7 +682,12 @@ func (c *Command) Runnable() bool {
 
 // Determine if the command has children commands
 func (c *Command) HasSubCommands() bool {
-	return len(c.commands) > 0
+	for _, sub := range c.commands {
+		if sub.Runnable() {
+			return true
+		}
+	}
+	return false
 }
 
 // Determine if the command is a child command
@@ -629,7 +695,7 @@ func (c *Command) HasParent() bool {
 	return c.parent != nil
 }
 
-// Get the Commands FlagSet
+// Get the complete FlagSet that applies to this command (local and persistent declared here and by all parents)
 func (c *Command) Flags() *flag.FlagSet {
 	if c.flags == nil {
 		c.flags = flag.NewFlagSet(c.Name(), flag.ContinueOnError)
@@ -637,12 +703,35 @@ func (c *Command) Flags() *flag.FlagSet {
 			c.flagErrorBuf = new(bytes.Buffer)
 		}
 		c.flags.SetOutput(c.flagErrorBuf)
-		c.flags.BoolVar(&c.helpFlagVal, "help", false, "help for "+c.Name())
+		c.assureHelpFlag()
 	}
 	return c.flags
 }
 
-// Get the Commands Persistent FlagSet
+func (c *Command) assureHelpFlag() {
+	if c.Flags().Lookup("help") == nil && c.PersistentFlags().Lookup("help") == nil {
+		c.PersistentFlags().BoolVarP(&c.helpFlagVal, "help", "h", false, "help for "+c.Name())
+	}
+	c.mergePersistentFlags()
+}
+
+// Get the local FlagSet specifically set in the current command
+func (c *Command) LocalFlags() *flag.FlagSet {
+	c.mergePersistentFlags()
+
+	local := flag.NewFlagSet(c.Name(), flag.ContinueOnError)
+	allPersistent := c.AllPersistentFlags()
+
+	c.Flags().VisitAll(func(f *flag.Flag) {
+		if allPersistent.Lookup(f.Name) == nil {
+			local.AddFlag(f)
+		}
+	})
+
+	return local
+}
+
+// Get the Persistent FlagSet specifically set in the current command
 func (c *Command) PersistentFlags() *flag.FlagSet {
 	if c.pflags == nil {
 		c.pflags = flag.NewFlagSet(c.Name(), flag.ContinueOnError)
@@ -652,6 +741,29 @@ func (c *Command) PersistentFlags() *flag.FlagSet {
 		c.pflags.SetOutput(c.flagErrorBuf)
 	}
 	return c.pflags
+}
+
+// Get the Persistent FlagSet traversing the Command hierarchy
+func (c *Command) AllPersistentFlags() *flag.FlagSet {
+	allPersistent := flag.NewFlagSet(c.Name(), flag.ContinueOnError)
+
+	var visit func(x *Command)
+	visit = func(x *Command) {
+		if x.HasPersistentFlags() {
+			x.PersistentFlags().VisitAll(func(f *flag.Flag) {
+				if allPersistent.Lookup(f.Name) == nil {
+					allPersistent.AddFlag(f)
+				}
+			})
+		}
+		if x.HasParent() {
+			visit(x.parent)
+		}
+	}
+
+	visit(c)
+
+	return allPersistent
 }
 
 // For use in testing
@@ -664,7 +776,7 @@ func (c *Command) ResetFlags() {
 	c.pflags.SetOutput(c.flagErrorBuf)
 }
 
-// Does the command contain flags (local not persistent)
+// Does the command contain any flags (local plus persistent from the entire structure)
 func (c *Command) HasFlags() bool {
 	return c.Flags().HasFlags()
 }
@@ -672,6 +784,16 @@ func (c *Command) HasFlags() bool {
 // Does the command contain persistent flags
 func (c *Command) HasPersistentFlags() bool {
 	return c.PersistentFlags().HasFlags()
+}
+
+// Does the command hierarchy contain persistent flags
+func (c *Command) HasAnyPersistentFlags() bool {
+	return c.AllPersistentFlags().HasFlags()
+}
+
+// Does the command has flags specifically declared locally
+func (c *Command) HasLocalFlags() bool {
+	return c.LocalFlags().HasFlags()
 }
 
 // Climbs up the command tree looking for matching flag
@@ -713,6 +835,10 @@ func (c *Command) ParseFlags(args []string) (err error) {
 	return nil
 }
 
+func (c *Command) Parent() *Command {
+	return c.parent
+}
+
 func (c *Command) mergePersistentFlags() {
 	var rmerge func(x *Command)
 
@@ -730,8 +856,4 @@ func (c *Command) mergePersistentFlags() {
 	}
 
 	rmerge(c)
-}
-
-func (c *Command) Parent() *Command {
-	return c.parent
 }

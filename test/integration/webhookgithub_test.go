@@ -6,28 +6,14 @@ import (
 	"bytes"
 	"io/ioutil"
 	"net/http"
-	"net/http/httptest"
-	"reflect"
 	"testing"
+	"time"
 
-	kubeapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	klatest "github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/master"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/version"
 
-	"github.com/openshift/origin/pkg/api/latest"
-	"github.com/openshift/origin/pkg/api/v1beta1"
 	buildapi "github.com/openshift/origin/pkg/build/api"
-	buildregistry "github.com/openshift/origin/pkg/build/registry/build"
-	buildconfigregistry "github.com/openshift/origin/pkg/build/registry/buildconfig"
-	buildetcd "github.com/openshift/origin/pkg/build/registry/etcd"
-	"github.com/openshift/origin/pkg/build/webhook"
-	"github.com/openshift/origin/pkg/build/webhook/github"
-	osclient "github.com/openshift/origin/pkg/client"
+	imageapi "github.com/openshift/origin/pkg/image/api"
 )
 
 func init() {
@@ -35,138 +21,186 @@ func init() {
 }
 
 func TestWebhookGithubPush(t *testing.T) {
-	osClient, url := setup(t)
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
 
 	// create buildconfig
-	buildConfig := &buildapi.BuildConfig{
-		JSONBase: kubeapi.JSONBase{
-			ID: "pushbuild",
-		},
-		DesiredInput: buildapi.BuildInput{
-			Type:      buildapi.DockerBuildType,
-			SourceURI: "http://my.docker/build",
-			ImageTag:  "namespace/builtimage",
-		},
-		Secret: "secret101",
-	}
-	if _, err := osClient.CreateBuildConfig(buildConfig); err != nil {
+	buildConfig := mockBuildConfigParms("image", "repo", "tag")
+	if _, err := openshift.Client.BuildConfigs(testNamespace).Create(buildConfig); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
+
+	watch, err := openshift.Client.Builds(testNamespace).Watch(labels.Everything(), labels.Everything(), "0")
+	if err != nil {
+		t.Fatalf("Couldn't subscribe to builds: %v", err)
+	}
+	defer watch.Stop()
 
 	// trigger build event sending push notification
-	postFile("push", "pushevent.json", url+"pushbuild/secret101/github", http.StatusOK, t)
+	postFile("push", "pushevent.json", openshift.server.URL+openshift.whPrefix+"pushbuild/secret101/github?namespace="+testNamespace, http.StatusOK, t)
 
-	// get a list of builds
-	builds, err := osClient.ListBuilds(labels.Everything())
-	if err != nil {
+	event := <-watch.ResultChan()
+	actual := event.Object.(*buildapi.Build)
+
+	if actual.Status != buildapi.BuildStatusNew {
+		t.Errorf("Expected %s, got %s", buildapi.BuildStatusNew, actual.Status)
+	}
+}
+
+func TestWebhookGithubPushWithImageTag(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+
+	// create imagerepo
+	imageRepo := &imageapi.ImageRepository{
+		ObjectMeta: kapi.ObjectMeta{Name: "imageRepo"},
+		Tags:       map[string]string{"validTag": "success"},
+	}
+	if _, err := openshift.Client.ImageRepositories(testNamespace).Create(imageRepo); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if len(builds.Items) != 1 {
-		t.Fatalf("Expected one build, got %#v", builds)
-	}
-	actual := builds.Items[0]
-	if actual.Status != buildapi.BuildNew {
-		t.Errorf("Expected %s, got %s", buildapi.BuildNew, actual.Status)
-	}
-	if !reflect.DeepEqual(actual.Input, buildConfig.DesiredInput) {
-		t.Errorf("Expected %#v, got %#v", buildConfig.DesiredInput, actual.Input)
+
+	// create buildconfig
+	buildConfig := mockBuildConfigParms("originalImage", "imageRepo", "validTag")
+
+	if _, err := openshift.Client.BuildConfigs(testNamespace).Create(buildConfig); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	cleanup(osClient, t)
+	watch, err := openshift.Client.Builds(testNamespace).Watch(labels.Everything(), labels.Everything(), "0")
+	if err != nil {
+		t.Fatalf("Couldn't subscribe to builds: %v", err)
+	}
+	defer watch.Stop()
+
+	// trigger build event sending push notification
+	postFile("push", "pushevent.json", openshift.server.URL+openshift.whPrefix+"pushbuild/secret101/github?namespace="+testNamespace, http.StatusOK, t)
+
+	event := <-watch.ResultChan()
+	actual := event.Object.(*buildapi.Build)
+
+	if actual.Status != buildapi.BuildStatusNew {
+		t.Errorf("Expected %s, got %s", buildapi.BuildStatusNew, actual.Status)
+	}
+
+	if actual.Parameters.Strategy.DockerStrategy.BaseImage != "registry:3000/integration-test/imageRepo:success" {
+		t.Errorf("Expected %s, got %s", "registry:3000/integration-test/imageRepo:success", actual.Parameters.Strategy.DockerStrategy.BaseImage)
+	}
+}
+
+func TestWebhookGithubPushWithImageTagUnmatched(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+
+	// create imagerepo
+	imageRepo := &imageapi.ImageRepository{
+		ObjectMeta: kapi.ObjectMeta{Name: "imageRepo"},
+		Tags:       map[string]string{"validTag": "success"},
+	}
+	if _, err := openshift.Client.ImageRepositories(testNamespace).Create(imageRepo); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	// create buildconfig
+	buildConfig := mockBuildConfigParms("originalImage", "imageRepo", "invalidTag")
+	if _, err := openshift.Client.BuildConfigs(testNamespace).Create(buildConfig); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	watch, err := openshift.Client.Builds(testNamespace).Watch(labels.Everything(), labels.Everything(), "0")
+	if err != nil {
+		t.Fatalf("Couldn't subscribe to builds: %v", err)
+	}
+	defer watch.Stop()
+
+	// trigger build event sending push notification
+	postFile("push", "pushevent.json", openshift.server.URL+openshift.whPrefix+"pushbuild/secret101/github?namespace="+testNamespace, http.StatusOK, t)
+
+	event := <-watch.ResultChan()
+	actual := event.Object.(*buildapi.Build)
+
+	if actual.Status != buildapi.BuildStatusNew {
+		t.Errorf("Expected %s, got %s", buildapi.BuildStatusNew, actual.Status)
+	}
+
+	if actual.Parameters.Strategy.DockerStrategy.BaseImage != "originalImage" {
+		t.Errorf("Expected %s, got %s", "originalImage", actual.Parameters.Strategy.DockerStrategy.BaseImage)
+	}
+}
+
+func TestWebhookGithubPushWithNamespaceUnmatched(t *testing.T) {
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
+
+	// create imagerepo
+	imageRepo := &imageapi.ImageRepository{
+		ObjectMeta: kapi.ObjectMeta{Namespace: "unmatched", Name: "imageRepo"},
+		Tags:       map[string]string{"validTag": "success"},
+	}
+	if _, err := openshift.Client.ImageRepositories("unmatched").Create(imageRepo); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	// create buildconfig
+	buildConfig := mockBuildConfigParms("originalImage", "imageRepo", "validTag")
+
+	if _, err := openshift.Client.BuildConfigs(testNamespace).Create(buildConfig); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	watch, err := openshift.Client.Builds(testNamespace).Watch(labels.Everything(), labels.Everything(), "0")
+	if err != nil {
+		t.Fatalf("Couldn't subscribe to builds: %v", err)
+	}
+	defer watch.Stop()
+
+	// trigger build event sending push notification
+	postFile("push", "pushevent.json", openshift.server.URL+openshift.whPrefix+"pushbuild/secret101/github?namespace="+testNamespace, http.StatusOK, t)
+
+	event := <-watch.ResultChan()
+	actual := event.Object.(*buildapi.Build)
+
+	if actual.Status != buildapi.BuildStatusNew {
+		t.Errorf("Expected %s, got %s", buildapi.BuildStatusNew, actual.Status)
+	}
+
+	if actual.Parameters.Strategy.DockerStrategy.BaseImage != "originalImage" {
+		t.Errorf("Expected %s, got %s", "originalImage", actual.Parameters.Strategy.DockerStrategy.BaseImage)
+	}
 }
 
 func TestWebhookGithubPing(t *testing.T) {
-	osClient, url := setup(t)
+	deleteAllEtcdKeys()
+	openshift := NewTestBuildOpenshift(t)
+	defer openshift.Close()
 
 	// create buildconfig
-	buildConfig := &buildapi.BuildConfig{
-		JSONBase: kubeapi.JSONBase{
-			ID: "pingbuild",
-		},
-		DesiredInput: buildapi.BuildInput{
-			Type:      buildapi.DockerBuildType,
-			SourceURI: "http://my.docker/build",
-			ImageTag:  "namespace/builtimage",
-		},
-		Secret: "secret101",
-	}
-	if _, err := osClient.CreateBuildConfig(buildConfig); err != nil {
+	buildConfig := mockBuildConfigParms("originalImage", "imageRepo", "validTag")
+	if _, err := openshift.Client.BuildConfigs(testNamespace).Create(buildConfig); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
+
+	watch, err := openshift.Client.Builds(testNamespace).Watch(labels.Everything(), labels.Everything(), "0")
+	if err != nil {
+		t.Fatalf("Couldn't subscribe to builds: %v", err)
+	}
+	defer watch.Stop()
 
 	// trigger build event sending push notification
-	postFile("ping", "pingevent.json", url+"pingbuild/secret101/github", http.StatusOK, t)
+	postFile("ping", "pingevent.json", openshift.server.URL+openshift.whPrefix+"pushbuild/secret101/github?namespace="+testNamespace, http.StatusOK, t)
 
-	// get a list of builds
-	builds, err := osClient.ListBuilds(labels.Everything())
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if len(builds.Items) != 0 {
-		t.Fatalf("Unexpected build appeared, got %#v", builds)
-	}
-
-	cleanup(osClient, t)
-}
-
-func setup(t *testing.T) (*osclient.Client, string) {
-	etcdClient := newEtcdClient()
-	helper, _ := master.NewEtcdHelper(etcdClient.GetCluster(), klatest.Version)
-	m := master.New(&master.Config{
-		EtcdHelper: helper,
-	})
-	interfaces, _ := latest.InterfacesFor(latest.Version)
-	buildRegistry := buildetcd.New(tools.EtcdHelper{etcdClient, interfaces.Codec, interfaces.ResourceVersioner})
-	storage := map[string]apiserver.RESTStorage{
-		"builds":       buildregistry.NewREST(buildRegistry),
-		"buildConfigs": buildconfigregistry.NewREST(buildRegistry),
-	}
-
-	osMux := http.NewServeMux()
-	apiserver.NewAPIGroup(m.API_v1beta1()).InstallREST(osMux, "/api/v1beta1")
-	osPrefix := "/osapi/v1beta1"
-	apiserver.NewAPIGroup(storage, v1beta1.Codec, osPrefix, interfaces.SelfLinker).InstallREST(osMux, osPrefix)
-	apiserver.InstallSupport(osMux)
-	s := httptest.NewServer(osMux)
-
-	kubeclient := client.NewOrDie(&client.Config{Host: s.URL, Version: klatest.Version})
-	osClient := osclient.NewOrDie(&client.Config{Host: s.URL, Version: latest.Version})
-
-	whPrefix := osPrefix + "/buildConfigHooks/"
-	osMux.Handle(whPrefix, http.StripPrefix(whPrefix,
-		webhook.NewController(osClient, map[string]webhook.Plugin{
-			"github": github.New(),
-		})))
-
-	info, err := kubeclient.ServerVersion()
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if e, a := version.Get(), *info; !reflect.DeepEqual(e, a) {
-		t.Errorf("Expected %#v, got %#v", e, a)
-	}
-
-	return osClient, s.URL + whPrefix
-}
-
-func cleanup(osClient *osclient.Client, t *testing.T) {
-	builds, err := osClient.ListBuilds(labels.Everything())
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	for _, build := range builds.Items {
-		if err := osClient.DeleteBuild(build.ID); err != nil {
-			t.Errorf("Unexpected error: %v", err)
-		}
-	}
-	buildConfigs, err := osClient.ListBuildConfigs(labels.Everything())
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	for _, bc := range buildConfigs.Items {
-		if err := osClient.DeleteBuildConfig(bc.ID); err != nil {
-			t.Errorf("Unexpected error: %v", err)
-		}
+	// TODO: improve negative testing
+	timer := time.NewTimer(time.Second / 2)
+	select {
+	case <-timer.C:
+		// nothing should happen
+	case event := <-watch.ResultChan():
+		build := event.Object.(*buildapi.Build)
+		t.Fatalf("Unexpected build created: %#v", build)
 	}
 }
 
@@ -190,5 +224,49 @@ func postFile(event, filename, url string, expStatusCode int, t *testing.T) {
 	body, _ := ioutil.ReadAll(resp.Body)
 	if resp.StatusCode != expStatusCode {
 		t.Errorf("Wrong response code, expecting %d, got %s: %s!", expStatusCode, resp.Status, string(body))
+	}
+}
+
+func mockBuildConfigParms(imageName, imageRepo, imageTag string) *buildapi.BuildConfig {
+	return &buildapi.BuildConfig{
+		ObjectMeta: kapi.ObjectMeta{
+			Name: "pushbuild",
+		},
+		Triggers: []buildapi.BuildTriggerPolicy{
+			{
+				Type: buildapi.GithubWebHookBuildTriggerType,
+				GithubWebHook: &buildapi.WebHookTrigger{
+					Secret: "secret101",
+				},
+			},
+			{
+				Type: buildapi.ImageChangeBuildTriggerType,
+				ImageChange: &buildapi.ImageChangeTrigger{
+					Image: imageName,
+					From: kapi.ObjectReference{
+						Name: imageRepo,
+					},
+					Tag: imageTag,
+				},
+			},
+		},
+		Parameters: buildapi.BuildParameters{
+			Source: buildapi.BuildSource{
+				Type: buildapi.BuildSourceGit,
+				Git: &buildapi.GitBuildSource{
+					URI: "http://my.docker/build",
+				},
+			},
+			Strategy: buildapi.BuildStrategy{
+				Type: buildapi.DockerBuildStrategyType,
+				DockerStrategy: &buildapi.DockerBuildStrategy{
+					ContextDir: "context",
+					BaseImage:  imageName,
+				},
+			},
+			Output: buildapi.BuildOutput{
+				DockerImageReference: "namespace/builtimage",
+			},
+		},
 	}
 }

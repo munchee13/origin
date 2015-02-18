@@ -34,13 +34,7 @@ The assets served by the OpenShift all-in-one server will now be up to date. By 
 #### Debugging Travis failures
 If Travis complains that bindata.go is different than the committed version, ensure the committed version is correct:
 
-1. Run `hack/install-assets.sh`
-2. Run `hack/build-assets.sh`
-3. If bindata.go is changed, add it to your commit and re-push
-
-If Travis still complains that bindata.go is different, do the following to get details about what is different:
-
-1. Run `hack/debug-asset-diff-local.sh` locally
-2. Add the generated debug.zip file to a commit and push it to your branch
-3. View the diff in the Travis log
-4. Once the issue is resolved, remove the commit containing the debug.zip
+1. Run `hack/clean-assets.sh`
+2. Run `hack/install-assets.sh`
+3. Run `hack/build-assets.sh`
+4. If bindata.go is changed, add it to your commit and re-push

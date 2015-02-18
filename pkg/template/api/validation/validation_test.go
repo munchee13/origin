@@ -1,32 +1,40 @@
 package validation
 
 import (
-	goruntime "runtime"
 	"testing"
 
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/errors"
 
 	"github.com/openshift/origin/pkg/template/api"
 )
+
+func makeParameter(name, value string) *api.Parameter {
+	return &api.Parameter{
+		Name:  name,
+		Value: value,
+	}
+}
 
 func TestValidateParameter(t *testing.T) {
 	var tests = []struct {
 		ParameterName   string
 		IsValidExpected bool
 	}{
-		{"VALID_NAME", true},
+		{"VALname_NAME", true},
 		{"_valid_name_99", true},
 		{"10gen_valid_name", true},
 		{"", false},
-		{"INVALID NAME", false},
-		{"IVALID-NAME", false},
-		{">INVALID_NAME", false},
-		{"$INVALID_NAME", false},
-		{"${INVALID_NAME}", false},
+		{"INVALname NAME", false},
+		{"IVALname-NAME", false},
+		{">INVALname_NAME", false},
+		{"$INVALname_NAME", false},
+		{"${INVALname_NAME}", false},
 	}
 
 	for _, test := range tests {
-		param := &api.Parameter{Name: test.ParameterName, Value: "1"}
+		param := makeParameter(test.ParameterName, "1")
 		if test.IsValidExpected && len(ValidateParameter(param)) != 0 {
 			t.Errorf("Expected zero validation errors on valid parameter name.")
 		}
@@ -36,38 +44,149 @@ func TestValidateParameter(t *testing.T) {
 	}
 }
 
+func TestValidateProcessTemplate(t *testing.T) {
+	var tests = []struct {
+		template        *api.Template
+		isValidExpected bool
+	}{
+		{ // Empty Template, should pass
+			&api.Template{},
+			true,
+		},
+		{ // Template with name, should pass
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{Name: "templateId"},
+			},
+			true,
+		},
+		{ // Template with invalid Parameter, should fail on Parameter name
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{Name: "templateId"},
+				Parameters: []api.Parameter{
+					*(makeParameter("", "1")),
+				},
+			},
+			false,
+		},
+		{ // Template with valid Parameter, should pass
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{Name: "templateId"},
+				Parameters: []api.Parameter{
+					*(makeParameter("VALname_NAME", "1")),
+				},
+			},
+			true,
+		},
+		{ // Template with Item of unknown Kind, should pass
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{Name: "templateId"},
+				Parameters: []api.Parameter{
+					*(makeParameter("VALname_NAME", "1")),
+				},
+				Objects: []runtime.Object{},
+			},
+			true,
+		},
+	}
+
+	for i, test := range tests {
+		errs := ValidateProcessedTemplate(test.template)
+		if len(errs) != 0 && test.isValidExpected {
+			t.Errorf("%d: Unexpected non-empty error list: %v", i, errors.NewAggregate(errs))
+		}
+		if len(errs) == 0 && !test.isValidExpected {
+			t.Errorf("%d: Unexpected empty error list: %#v", i, errs)
+		}
+	}
+}
+
 func TestValidateTemplate(t *testing.T) {
-	shouldPass := func(template *api.Template) {
-		errs := ValidateTemplate(template)
-		if len(errs) != 0 {
-			_, _, line, _ := goruntime.Caller(1)
-			t.Errorf("line %v: Unexpected non-zero error list: %#v", line, errs)
+	var tests = []struct {
+		template        *api.Template
+		isValidExpected bool
+	}{
+		{ // Empty Template, should fail on empty name
+			&api.Template{},
+			false,
+		},
+		{ // Template with name, should pass
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{
+					Name:      "template",
+					Namespace: kapi.NamespaceDefault,
+				},
+			},
+			true,
+		},
+		{ // Template without namespace, should fail
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{
+					Name: "template",
+				},
+			},
+			false,
+		},
+		{ // Template with invalid name characters, should fail
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{
+					Name:      "templateId",
+					Namespace: kapi.NamespaceDefault,
+				},
+			},
+			false,
+		},
+		{ // Template with invalid Parameter, should fail on Parameter name
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{Name: "template", Namespace: kapi.NamespaceDefault},
+				Parameters: []api.Parameter{
+					*(makeParameter("", "1")),
+				},
+			},
+			false,
+		},
+		{ // Template with valid Parameter, should pass
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{Name: "template", Namespace: kapi.NamespaceDefault},
+				Parameters: []api.Parameter{
+					*(makeParameter("VALname_NAME", "1")),
+				},
+			},
+			true,
+		},
+		{ // Template with empty items, should pass
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{Name: "template", Namespace: kapi.NamespaceDefault},
+				Parameters: []api.Parameter{},
+				Objects:    []runtime.Object{},
+			},
+			true,
+		},
+		{ // Template with an item that is invalid, should pass
+			&api.Template{
+				ObjectMeta: kapi.ObjectMeta{Name: "template", Namespace: kapi.NamespaceDefault},
+				Parameters: []api.Parameter{},
+				Objects: []runtime.Object{
+					&kapi.Service{
+						ObjectMeta: kapi.ObjectMeta{
+							GenerateName: "test",
+						},
+						Spec: kapi.ServiceSpec{
+							Port: 8080,
+						},
+					},
+				},
+			},
+			true,
+		},
+	}
+
+	for i, test := range tests {
+		errs := ValidateTemplate(test.template)
+		if len(errs) != 0 && test.isValidExpected {
+			t.Errorf("%d: Unexpected non-empty error list: %v", i, errors.NewAggregate(errs))
+		}
+		if len(errs) == 0 && !test.isValidExpected {
+			t.Errorf("%d: Unexpected empty error list: %v", i, errs)
 		}
 	}
-	shouldFail := func(template *api.Template) {
-		if len(ValidateTemplate(template)) == 0 {
-			_, _, line, _ := goruntime.Caller(1)
-			t.Errorf("line %v: Expected non-zero error list", line)
-		}
-	}
-
-	// Test empty Template, should fail on empty ID
-	template := &api.Template{}
-	shouldFail(template)
-
-	// Set ID, should pass
-	template.JSONBase.ID = "templateId"
-	shouldPass(template)
-
-	// Add invalid Parameter, should fail on Parameter name
-	template.Parameters = []api.Parameter{{Name: "", Value: "1"}}
-	shouldFail(template)
-
-	// Fix Parameter name, should pass
-	template.Parameters[0].Name = "VALID_NAME"
-	shouldPass(template)
-
-	// Add Item of unknown Kind, should pass
-	template.Items = []runtime.EmbeddedObject{{}}
-	shouldPass(template)
 }

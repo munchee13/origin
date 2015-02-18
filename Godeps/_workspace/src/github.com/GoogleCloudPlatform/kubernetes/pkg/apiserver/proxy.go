@@ -18,21 +18,25 @@ package apiserver
 
 import (
 	"bytes"
+	"compress/gzip"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/httplog"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 
-	"code.google.com/p/go.net/html"
 	"github.com/golang/glog"
+	"golang.org/x/net/html"
 )
 
 // tagsToAttrs states which attributes of which tags require URL substitution.
@@ -71,42 +75,79 @@ var tagsToAttrs = map[string]util.StringSet{
 // ProxyHandler provides a http.Handler which will proxy traffic to locations
 // specified by items implementing Redirector.
 type ProxyHandler struct {
-	prefix  string
-	storage map[string]RESTStorage
-	codec   runtime.Codec
+	prefix                 string
+	storage                map[string]RESTStorage
+	codec                  runtime.Codec
+	context                api.RequestContextMapper
+	apiRequestInfoResolver *APIRequestInfoResolver
 }
 
 func (r *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	ctx := api.NewContext()
-	parts := strings.SplitN(req.URL.Path, "/", 3)
+	var verb string
+	var apiResource string
+	var httpCode int
+	reqStart := time.Now()
+	defer func() { monitor("proxy", verb, apiResource, httpCode, reqStart) }()
+
+	requestInfo, err := r.apiRequestInfoResolver.GetAPIRequestInfo(req)
+	if err != nil {
+		notFound(w, req)
+		httpCode = http.StatusNotFound
+		return
+	}
+	verb = requestInfo.Verb
+	namespace, resource, parts := requestInfo.Namespace, requestInfo.Resource, requestInfo.Parts
+
+	ctx, ok := r.context.Get(req)
+	if !ok {
+		ctx = api.NewContext()
+	}
+	ctx = api.WithNamespace(ctx, namespace)
 	if len(parts) < 2 {
 		notFound(w, req)
+		httpCode = http.StatusNotFound
 		return
 	}
-	resourceName := parts[0]
 	id := parts[1]
 	rest := ""
-	if len(parts) == 3 {
-		rest = parts[2]
+	if len(parts) > 2 {
+		proxyParts := parts[2:]
+		rest = strings.Join(proxyParts, "/")
+		if strings.HasSuffix(req.URL.Path, "/") {
+			// The original path had a trailing slash, which has been stripped
+			// by KindAndNamespace(). We should add it back because some
+			// servers (like etcd) require it.
+			rest = rest + "/"
+		}
 	}
-	storage, ok := r.storage[resourceName]
+	storage, ok := r.storage[resource]
 	if !ok {
-		httplog.LogOf(req, w).Addf("'%v' has no storage object", resourceName)
+		httplog.LogOf(req, w).Addf("'%v' has no storage object", resource)
 		notFound(w, req)
+		httpCode = http.StatusNotFound
 		return
 	}
+	apiResource = resource
 
 	redirector, ok := storage.(Redirector)
 	if !ok {
-		httplog.LogOf(req, w).Addf("'%v' is not a redirector", resourceName)
-		notFound(w, req)
+		httplog.LogOf(req, w).Addf("'%v' is not a redirector", resource)
+		httpCode = errorJSON(errors.NewMethodNotSupported(resource, "proxy"), r.codec, w)
 		return
 	}
 
 	location, err := redirector.ResourceLocation(ctx, id)
 	if err != nil {
+		httplog.LogOf(req, w).Addf("Error getting ResourceLocation: %v", err)
 		status := errToAPIStatus(err)
 		writeJSON(status.Code, r.codec, status, w)
+		httpCode = status.Code
+		return
+	}
+	if location == "" {
+		httplog.LogOf(req, w).Addf("ResourceLocation for %v returned ''", id)
+		notFound(w, req)
+		httpCode = http.StatusNotFound
 		return
 	}
 
@@ -114,22 +155,34 @@ func (r *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		status := errToAPIStatus(err)
 		writeJSON(status.Code, r.codec, status, w)
+		httpCode = status.Code
 		return
+	}
+	if destURL.Scheme == "" {
+		// If no scheme was present in location, url.Parse sometimes mistakes
+		// hosts for paths.
+		destURL.Host = location
 	}
 	destURL.Path = rest
 	destURL.RawQuery = req.URL.RawQuery
 	newReq, err := http.NewRequest(req.Method, destURL.String(), req.Body)
 	if err != nil {
-		glog.Errorf("Failed to create request: %s", err)
+		status := errToAPIStatus(err)
+		writeJSON(status.Code, r.codec, status, w)
+		notFound(w, req)
+		httpCode = status.Code
+		return
 	}
+	httpCode = http.StatusOK
 	newReq.Header = req.Header
 
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: destURL.Host})
 	proxy.Transport = &proxyTransport{
 		proxyScheme:      req.URL.Scheme,
 		proxyHost:        req.URL.Host,
-		proxyPathPrepend: path.Join(r.prefix, resourceName, id),
+		proxyPathPrepend: path.Join(r.prefix, "ns", namespace, resource, id),
 	}
+	proxy.FlushInterval = 200 * time.Millisecond
 	proxy.ServeHTTP(w, newReq)
 }
 
@@ -140,6 +193,11 @@ type proxyTransport struct {
 }
 
 func (t *proxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Add reverse proxy headers.
+	req.Header.Set("X-Forwarded-Uri", t.proxyPathPrepend+req.URL.Path)
+	req.Header.Set("X-Forwarded-Host", t.proxyHost)
+	req.Header.Set("X-Forwarded-Proto", t.proxyScheme)
+
 	resp, err := http.DefaultTransport.RoundTrip(req)
 
 	if err != nil {
@@ -151,12 +209,50 @@ func (t *proxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
-	if resp.Header.Get("Content-Type") != "text/html" {
+	if redirect := resp.Header.Get("Location"); redirect != "" {
+		resp.Header.Set("Location", t.rewriteURL(redirect, req.URL))
+	}
+
+	cType := resp.Header.Get("Content-Type")
+	cType = strings.TrimSpace(strings.SplitN(cType, ";", 2)[0])
+	if cType != "text/html" {
 		// Do nothing, simply pass through
 		return resp, nil
 	}
 
 	return t.fixLinks(req, resp)
+}
+
+// rewriteURL rewrites a single URL to go through the proxy, if the URL refers
+// to the same host as sourceURL, which is the page on which the target URL
+// occurred. If any error occurs (e.g. parsing), it returns targetURL.
+func (t *proxyTransport) rewriteURL(targetURL string, sourceURL *url.URL) string {
+	url, err := url.Parse(targetURL)
+	if err != nil {
+		return targetURL
+	}
+	if url.Host != "" && url.Host != sourceURL.Host {
+		return targetURL
+	}
+
+	url.Scheme = t.proxyScheme
+	url.Host = t.proxyHost
+	origPath := url.Path
+
+	if strings.HasPrefix(url.Path, "/") {
+		// The path is rooted at the host. Just add proxy prepend.
+		url.Path = path.Join(t.proxyPathPrepend, url.Path)
+	} else {
+		// The path is relative to sourceURL.
+		url.Path = path.Join(t.proxyPathPrepend, path.Dir(sourceURL.Path), url.Path)
+	}
+
+	if strings.HasSuffix(origPath, "/") {
+		// Add back the trailing slash, which was stripped by path.Join().
+		url.Path += "/"
+	}
+
+	return url.String()
 }
 
 // updateURLs checks and updates any of n's attributes that are listed in tagsToAttrs.
@@ -176,22 +272,7 @@ func (t *proxyTransport) updateURLs(n *html.Node, sourceURL *url.URL) {
 		if !attrs.Has(attr.Key) {
 			continue
 		}
-		url, err := url.Parse(attr.Val)
-		if err != nil {
-			continue
-		}
-		// Is this URL relative?
-		if url.Host == "" {
-			url.Scheme = t.proxyScheme
-			url.Host = t.proxyHost
-			url.Path = path.Join(t.proxyPathPrepend, path.Dir(sourceURL.Path), url.Path, "/")
-			n.Attr[i].Val = url.String()
-		} else if url.Host == sourceURL.Host {
-			url.Scheme = t.proxyScheme
-			url.Host = t.proxyHost
-			url.Path = path.Join(t.proxyPathPrepend, url.Path)
-			n.Attr[i].Val = url.String()
-		}
+		n.Attr[i].Val = t.rewriteURL(attr.Val, sourceURL)
 	}
 }
 
@@ -205,17 +286,40 @@ func (t *proxyTransport) scan(n *html.Node, f func(*html.Node)) {
 
 // fixLinks modifies links in an HTML file such that they will be redirected through the proxy if needed.
 func (t *proxyTransport) fixLinks(req *http.Request, resp *http.Response) (*http.Response, error) {
-	defer resp.Body.Close()
+	origBody := resp.Body
+	defer origBody.Close()
 
-	doc, err := html.Parse(resp.Body)
+	newContent := &bytes.Buffer{}
+	var reader io.Reader = origBody
+	var writer io.Writer = newContent
+	encoding := resp.Header.Get("Content-Encoding")
+	switch encoding {
+	case "gzip":
+		var err error
+		reader, err = gzip.NewReader(reader)
+		if err != nil {
+			return nil, fmt.Errorf("errorf making gzip reader: %v", err)
+		}
+		gzw := gzip.NewWriter(writer)
+		defer gzw.Close()
+		writer = gzw
+	// TODO: support flate, other encodings.
+	case "":
+		// This is fine
+	default:
+		// Some encoding we don't understand-- don't try to parse this
+		glog.Errorf("Proxy encountered encoding %v for text/html; can't understand this so not fixing links.", encoding)
+		return resp, nil
+	}
+
+	doc, err := html.Parse(reader)
 	if err != nil {
 		glog.Errorf("Parse failed: %v", err)
 		return resp, err
 	}
 
-	newContent := &bytes.Buffer{}
 	t.scan(doc, func(n *html.Node) { t.updateURLs(n, req.URL) })
-	if err := html.Render(newContent, doc); err != nil {
+	if err := html.Render(writer, doc); err != nil {
 		glog.Errorf("Failed to render: %v", err)
 	}
 

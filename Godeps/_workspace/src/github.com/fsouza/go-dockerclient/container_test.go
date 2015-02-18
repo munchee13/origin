@@ -102,6 +102,14 @@ func TestListContainersParams(t *testing.T) {
 			ListContainersOptions{All: true, Limit: 10, Since: "adf9983", Before: "abdeef"},
 			map[string][]string{"all": {"1"}, "limit": {"10"}, "since": {"adf9983"}, "before": {"abdeef"}},
 		},
+		{
+			ListContainersOptions{Filters: map[string][]string{"status": {"paused", "running"}}},
+			map[string][]string{"filters": {"{\"status\":[\"paused\",\"running\"]}"}},
+		},
+		{
+			ListContainersOptions{All: true, Filters: map[string][]string{"exited": {"0"}, "status": {"exited"}}},
+			map[string][]string{"all": {"1"}, "filters": {"{\"exited\":[\"0\"],\"status\":[\"exited\"]}"}},
+		},
 	}
 	fakeRT := &FakeRoundTripper{message: "[]", status: http.StatusOK}
 	client := newTestClient(fakeRT)
@@ -437,6 +445,27 @@ func TestCreateContainerImageNotFound(t *testing.T) {
 	}
 	if !reflect.DeepEqual(err, ErrNoSuchImage) {
 		t.Errorf("CreateContainer: Wrong error type. Want %#v. Got %#v.", ErrNoSuchImage, err)
+	}
+}
+
+func TestCreateContainerWithHostConfig(t *testing.T) {
+	fakeRT := &FakeRoundTripper{message: "{}", status: http.StatusOK}
+	client := newTestClient(fakeRT)
+	config := Config{}
+	hostConfig := HostConfig{PublishAllPorts: true}
+	opts := CreateContainerOptions{Name: "TestCreateContainerWithHostConfig", Config: &config, HostConfig: &hostConfig}
+	_, err := client.CreateContainer(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := fakeRT.requests[0]
+	var gotBody map[string]interface{}
+	err = json.NewDecoder(req.Body).Decode(&gotBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := gotBody["HostConfig"]; !ok {
+		t.Errorf("CreateContainer: wrong body. HostConfig was not serialized")
 	}
 }
 
@@ -1251,7 +1280,7 @@ func TestLogsNoContainer(t *testing.T) {
 }
 
 func TestNoSuchContainerError(t *testing.T) {
-	var err error = &NoSuchContainer{ID: "i345"}
+	var err = &NoSuchContainer{ID: "i345"}
 	expected := "No such container: i345"
 	if got := err.Error(); got != expected {
 		t.Errorf("NoSuchContainer: wrong message. Want %q. Got %q.", expected, got)
@@ -1412,5 +1441,84 @@ func TestNeverRestart(t *testing.T) {
 	}
 	if policy.MaximumRetryCount != 0 {
 		t.Errorf("NeverRestart(): wrong MaximumRetryCount. Want 0. Got %d", policy.MaximumRetryCount)
+	}
+}
+
+func TestTopContainer(t *testing.T) {
+	jsonTop := `{
+  "Processes": [
+    [
+      "ubuntu",
+      "3087",
+      "815",
+      "0",
+      "01:44",
+      "?",
+      "00:00:00",
+      "cmd1"
+    ],
+    [
+      "root",
+      "3158",
+      "3087",
+      "0",
+      "01:44",
+      "?",
+      "00:00:01",
+      "cmd2"
+    ]
+  ],
+  "Titles": [
+    "UID",
+    "PID",
+    "PPID",
+    "C",
+    "STIME",
+    "TTY",
+    "TIME",
+    "CMD"
+  ]
+}`
+	var expected TopResult
+	err := json.Unmarshal([]byte(jsonTop), &expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "4fa6e0f0"
+	fakeRT := &FakeRoundTripper{message: jsonTop, status: http.StatusOK}
+	client := newTestClient(fakeRT)
+	processes, err := client.TopContainer(id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(processes, expected) {
+		t.Errorf("TopContainer: Expected %#v. Got %#v.", expected, processes)
+	}
+	if len(processes.Processes) != 2 || len(processes.Processes[0]) != 8 ||
+		processes.Processes[0][7] != "cmd1" {
+		t.Errorf("TopContainer: Process list to include cmd1. Got %#v.", expected, processes)
+	}
+	expectedURI := "/containers/" + id + "/top"
+	if !strings.HasSuffix(fakeRT.requests[0].URL.String(), expectedURI) {
+		t.Errorf("TopContainer: Expected URI to have %q. Got %q.", expectedURI, fakeRT.requests[0].URL.String())
+	}
+}
+
+func TestTopContainerNotFound(t *testing.T) {
+	client := newTestClient(&FakeRoundTripper{message: "no such container", status: http.StatusNotFound})
+	_, err := client.TopContainer("abef348", "")
+	expected := &NoSuchContainer{ID: "abef348"}
+	if !reflect.DeepEqual(err, expected) {
+		t.Errorf("StopContainer: Wrong error returned. Want %#v. Got %#v.", expected, err)
+	}
+}
+
+func TestTopContainerWithPsArgs(t *testing.T) {
+	fakeRT := &FakeRoundTripper{message: "no such container", status: http.StatusNotFound}
+	client := newTestClient(fakeRT)
+	client.TopContainer("abef348", "aux")
+	expectedURI := "/containers/abef348/top?ps_args=aux"
+	if !strings.HasSuffix(fakeRT.requests[0].URL.String(), expectedURI) {
+		t.Errorf("TopContainer: Expected URI to have %q. Got %q.", expectedURI, fakeRT.requests[0].URL.String())
 	}
 }

@@ -10,14 +10,17 @@ import (
 
 // ExpressionValueGenerator implements Generator interface. It generates
 // random string based on the input expression. The input expression is
-// a string, which may contain "[a-zA-Z0-9]{length}" expression constructs,
+// a string, which may contain "[a-zA-Z0-9]{length}" constructs,
 // defining range and length of the result random characters.
 //
 // Examples:
-//   - "test[0-9]{1}x" => "test7x"
-//   - "[0-1]{8}" => "01001100"
-//   - "0x[A-F0-9]{4}" => "0xB3AF"
-//   - "[a-zA-Z0-9]{8}" => "hW4yQU5i"
+//
+// from             | value
+// -----------------------------
+// "test[0-9]{1}x"  | "test7x"
+// "[0-1]{8}"       | "01001100"
+// "0x[A-F0-9]{4}"  | "0xB3AF"
+// "[a-zA-Z0-9]{8}" | "hW4yQU5i"
 //
 // TODO: Support more regexp constructs.
 type ExpressionValueGenerator struct {
@@ -27,7 +30,7 @@ type ExpressionValueGenerator struct {
 const (
 	Alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	Numerals = "0123456789"
-	Ascii    = Alphabet + Numerals + "~!@#$%^&*()-_+={}[]\\|<,>.?/\"';:`"
+	ASCII    = Alphabet + Numerals + "~!@#$%^&*()-_+={}[]\\|<,>.?/\"';:`"
 )
 
 var (
@@ -71,32 +74,32 @@ func (g ExpressionValueGenerator) GenerateValue(expression string) (interface{},
 // alphabetSlice produces a string slice that contains all characters within
 // a specified range.
 func alphabetSlice(from, to byte) (string, error) {
-	leftPos := strings.Index(Ascii, string(from))
-	rightPos := strings.LastIndex(Ascii, string(to))
+	leftPos := strings.Index(ASCII, string(from))
+	rightPos := strings.LastIndex(ASCII, string(to))
 	if leftPos > rightPos {
 		return "", fmt.Errorf("Invalid range specified: %s-%s", string(from), string(to))
 	}
-	return Ascii[leftPos:rightPos], nil
+	return ASCII[leftPos:rightPos], nil
 }
 
-// replaceWithGenerated replaces all occurences of the given expression
+// replaceWithGenerated replaces all occurrences of the given expression
 // in the string with random characters of the specified range and length.
 func replaceWithGenerated(s *string, expression string, ranges [][]byte, length int, seed *rand.Rand) error {
 	var alphabet string
 	for _, r := range ranges {
 		switch string(r[0]) + string(r[1]) {
 		case `\w`:
-			alphabet += Ascii
+			alphabet += ASCII
 		case `\d`:
 			alphabet += Numerals
 		case `\a`:
 			alphabet += Alphabet + Numerals
 		default:
-			if slice, err := alphabetSlice(r[0], r[1]); err != nil {
+			slice, err := alphabetSlice(r[0], r[1])
+			if err != nil {
 				return err
-			} else {
-				alphabet += slice
 			}
+			alphabet += slice
 		}
 	}
 	result := make([]byte, length)
@@ -131,7 +134,6 @@ func rangesAndLength(s string) (string, int, error) {
 	// TODO: We do need to set a better limit for the number of generated characters.
 	if length > 0 && length <= 255 {
 		return expr, length, nil
-	} else {
-		return "", 0, fmt.Errorf("Range must be within [1-255] characters (%d)", length)
 	}
+	return "", 0, fmt.Errorf("Range must be within [1-255] characters (%d)", length)
 }

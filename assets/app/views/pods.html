@@ -1,23 +1,17 @@
-<div class="simple-controller">
-
-  <div class="row-fluid">
-    <div class="span6 offset3">
-      <h2>OpenShift 3.x Demo</h2>
+<div ng-controller="ProjectController">
+  <project-page>
+    <div ng-controller="PodsController">
+      <h1>Pods</h1>
+      <alerts alerts="alerts"></alerts>      
+      <div ng-if="(pods | hashSize) == 0">
+        <div>
+          <em>{{emptyMessage}}</em>
+        </div>
+      </div>      
+      <div style="margin-bottom: 10px;" ng-repeat="pod in pods">
+        <h3>{{pod.metadata.name}} ({{pod.status.phase}})</h3>
+        <pod-template ng-init="podTemplate = pod"></pod-template>
+      </div>      
     </div>
-  </div>
-  <div class="row-fluid">
-    <div class="span6 offset3">
-      <h3>Pods:</h3>
-      <ul>
-        <li ng-repeat="pod in pods">
-          <a href="#/pods/{{pod.id}}">{{pod.id}}</a> - containers:
-          <ul>
-            <li ng-repeat="container in pod.desiredState.manifest.containers">
-            {{container.image}} - ports: <span ng-repeat="port in container.ports">{{port.hostPort}}:{{port.containerPort}}</span>
-            </li>
-          </ul>
-        </li>
-      </ul>
-    </div>
-  </div>
+  </project-page>
 </div>

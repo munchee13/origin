@@ -3,16 +3,15 @@ package imagerepository
 import (
 	"fmt"
 
-	"code.google.com/p/go-uuid/uuid"
-
-	kubeapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 
 	"github.com/openshift/origin/pkg/image/api"
+	"github.com/openshift/origin/pkg/image/api/validation"
 )
 
 // REST implements the RESTStorage interface in terms of an Registry.
@@ -22,7 +21,9 @@ type REST struct {
 
 // NewREST returns a new REST.
 func NewREST(registry Registry) apiserver.RESTStorage {
-	return &REST{registry}
+	return &REST{
+		registry: registry,
+	}
 }
 
 // New returns a new ImageRepository for use with Create and Update.
@@ -30,82 +31,64 @@ func (s *REST) New() runtime.Object {
 	return &api.ImageRepository{}
 }
 
+func (*REST) NewList() runtime.Object {
+	return &api.ImageRepository{}
+}
+
 // List retrieves a list of ImageRepositories that match selector.
-func (s *REST) List(ctx kubeapi.Context, selector, fields labels.Selector) (runtime.Object, error) {
-	imageRepositories, err := s.registry.ListImageRepositories(selector)
-	if err != nil {
-		return nil, err
-	}
-	return imageRepositories, err
+func (s *REST) List(ctx kapi.Context, selector, fields labels.Selector) (runtime.Object, error) {
+	return s.registry.ListImageRepositories(ctx, selector)
 }
 
 // Get retrieves an ImageRepository by id.
-func (s *REST) Get(ctx kubeapi.Context, id string) (runtime.Object, error) {
-	repo, err := s.registry.GetImageRepository(id)
-	if err != nil {
-		return nil, err
-	}
-	return repo, nil
+func (s *REST) Get(ctx kapi.Context, id string) (runtime.Object, error) {
+	return s.registry.GetImageRepository(ctx, id)
 }
 
 // Watch begins watching for new, changed, or deleted ImageRepositories.
-func (s *REST) Watch(ctx kubeapi.Context, label, field labels.Selector, resourceVersion uint64) (watch.Interface, error) {
-	return s.registry.WatchImageRepositories(resourceVersion, func(repo *api.ImageRepository) bool {
-		fields := labels.Set{
-			"ID": repo.ID,
-			"DockerImageRepository": repo.DockerImageRepository,
-		}
-		return label.Matches(labels.Set(repo.Labels)) && field.Matches(fields)
-	})
+func (s *REST) Watch(ctx kapi.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error) {
+	return s.registry.WatchImageRepositories(ctx, label, field, resourceVersion)
 }
 
 // Create registers the given ImageRepository.
-func (s *REST) Create(ctx kubeapi.Context, obj runtime.Object) (<-chan runtime.Object, error) {
-	repo, ok := obj.(*api.ImageRepository)
-	if !ok {
-		return nil, fmt.Errorf("not an image repository: %#v", obj)
+func (s *REST) Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, error) {
+	repo := obj.(*api.ImageRepository)
+	if !kapi.ValidNamespace(ctx, &repo.ObjectMeta) {
+		return nil, errors.NewConflict("imageRepository", repo.Namespace, fmt.Errorf("ImageRepository.Namespace does not match the provided context"))
 	}
 
-	if len(repo.ID) == 0 {
-		repo.ID = uuid.NewUUID().String()
+	kapi.FillObjectMetaSystemFields(ctx, &repo.ObjectMeta)
+	if errs := validation.ValidateImageRepository(repo); len(errs) > 0 {
+		return nil, errors.NewInvalid("imageRepository", repo.Name, errs)
 	}
 
-	if repo.Tags == nil {
-		repo.Tags = make(map[string]string)
+	repo.Status = api.ImageRepositoryStatus{}
+	if err := s.registry.CreateImageRepository(ctx, repo); err != nil {
+		return nil, err
 	}
-
-	repo.CreationTimestamp = util.Now()
-
-	return apiserver.MakeAsync(func() (runtime.Object, error) {
-		if err := s.registry.CreateImageRepository(repo); err != nil {
-			return nil, err
-		}
-		return s.Get(ctx, repo.ID)
-	}), nil
+	return s.Get(ctx, repo.Name)
 }
 
 // Update replaces an existing ImageRepository in the registry with the given ImageRepository.
-func (s *REST) Update(ctx kubeapi.Context, obj runtime.Object) (<-chan runtime.Object, error) {
-	repo, ok := obj.(*api.ImageRepository)
-	if !ok {
-		return nil, fmt.Errorf("not an image repository: %#v", obj)
+func (s *REST) Update(ctx kapi.Context, obj runtime.Object) (runtime.Object, bool, error) {
+	repo := obj.(*api.ImageRepository)
+	if !kapi.ValidNamespace(ctx, &repo.ObjectMeta) {
+		return nil, false, errors.NewConflict("imageRepository", repo.Namespace, fmt.Errorf("ImageRepository.Namespace does not match the provided context"))
 	}
-	if len(repo.ID) == 0 {
-		return nil, fmt.Errorf("id is unspecified: %#v", repo)
+	if errs := validation.ValidateImageRepository(repo); len(errs) > 0 {
+		return nil, false, errors.NewInvalid("imageRepository", repo.Name, errs)
 	}
 
-	return apiserver.MakeAsync(func() (runtime.Object, error) {
-		err := s.registry.UpdateImageRepository(repo)
-		if err != nil {
-			return nil, err
-		}
-		return s.Get(ctx, repo.ID)
-	}), nil
+	repo.Status = api.ImageRepositoryStatus{}
+
+	if err := s.registry.UpdateImageRepository(ctx, repo); err != nil {
+		return nil, false, err
+	}
+	out, err := s.Get(ctx, repo.Name)
+	return out, false, err
 }
 
 // Delete asynchronously deletes an ImageRepository specified by its id.
-func (s *REST) Delete(ctx kubeapi.Context, id string) (<-chan runtime.Object, error) {
-	return apiserver.MakeAsync(func() (runtime.Object, error) {
-		return &kubeapi.Status{Status: kubeapi.StatusSuccess}, s.registry.DeleteImageRepository(id)
-	}), nil
+func (s *REST) Delete(ctx kapi.Context, id string) (runtime.Object, error) {
+	return &kapi.Status{Status: kapi.StatusSuccess}, s.registry.DeleteImageRepository(ctx, id)
 }

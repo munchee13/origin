@@ -18,11 +18,11 @@ package tools
 
 import (
 	"fmt"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
@@ -32,11 +32,11 @@ import (
 func TestWatchInterpretations(t *testing.T) {
 	codec := latest.Codec
 	// Declare some pods to make the test cases compact.
-	podFoo := &api.Pod{JSONBase: api.JSONBase{ID: "foo"}}
-	podBar := &api.Pod{JSONBase: api.JSONBase{ID: "bar"}}
-	podBaz := &api.Pod{JSONBase: api.JSONBase{ID: "baz"}}
+	podFoo := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}
+	podBar := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "bar"}}
+	podBaz := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "baz"}}
 	firstLetterIsB := func(obj runtime.Object) bool {
-		return obj.(*api.Pod).ID[0] == 'b'
+		return obj.(*api.Pod).Name[0] == 'b'
 	}
 
 	// All of these test cases will be run with the firstLetterIsB FilterFunc.
@@ -112,7 +112,7 @@ func TestWatchInterpretations(t *testing.T) {
 
 	for name, item := range table {
 		for _, action := range item.actions {
-			w := newEtcdWatcher(true, firstLetterIsB, codec, versioner, nil)
+			w := newEtcdWatcher(true, nil, firstLetterIsB, codec, versioner, nil)
 			emitCalled := false
 			w.emit = func(event watch.Event) {
 				emitCalled = true
@@ -122,7 +122,7 @@ func TestWatchInterpretations(t *testing.T) {
 				if e, a := item.expectType, event.Type; e != a {
 					t.Errorf("'%v - %v': expected %v, got %v", name, action, e, a)
 				}
-				if e, a := item.expectObject, event.Object; !reflect.DeepEqual(e, a) {
+				if e, a := item.expectObject, event.Object; !api.Semantic.DeepDerivative(e, a) {
 					t.Errorf("'%v - %v': expected %v, got %v", name, action, e, a)
 				}
 			}
@@ -150,7 +150,7 @@ func TestWatchInterpretations(t *testing.T) {
 }
 
 func TestWatchInterpretation_ResponseNotSet(t *testing.T) {
-	w := newEtcdWatcher(false, Everything, codec, versioner, nil)
+	w := newEtcdWatcher(false, nil, Everything, codec, versioner, nil)
 	w.emit = func(e watch.Event) {
 		t.Errorf("Unexpected emit: %v", e)
 	}
@@ -164,7 +164,7 @@ func TestWatchInterpretation_ResponseNotSet(t *testing.T) {
 func TestWatchInterpretation_ResponseNoNode(t *testing.T) {
 	actions := []string{"create", "set", "compareAndSwap", "delete"}
 	for _, action := range actions {
-		w := newEtcdWatcher(false, Everything, codec, versioner, nil)
+		w := newEtcdWatcher(false, nil, Everything, codec, versioner, nil)
 		w.emit = func(e watch.Event) {
 			t.Errorf("Unexpected emit: %v", e)
 		}
@@ -178,7 +178,7 @@ func TestWatchInterpretation_ResponseNoNode(t *testing.T) {
 func TestWatchInterpretation_ResponseBadData(t *testing.T) {
 	actions := []string{"create", "set", "compareAndSwap", "delete"}
 	for _, action := range actions {
-		w := newEtcdWatcher(false, Everything, codec, versioner, nil)
+		w := newEtcdWatcher(false, nil, Everything, codec, versioner, nil)
 		w.emit = func(e watch.Event) {
 			t.Errorf("Unexpected emit: %v", e)
 		}
@@ -236,7 +236,7 @@ func TestWatch(t *testing.T) {
 	}
 
 	// Test normal case
-	pod := &api.Pod{JSONBase: api.JSONBase{ID: "foo"}}
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}
 	podBytes, _ := codec.Encode(pod)
 	fakeClient.WatchResponse <- &etcd.Response{
 		Action: "set",
@@ -249,7 +249,7 @@ func TestWatch(t *testing.T) {
 	if e, a := watch.Added, event.Type; e != a {
 		t.Errorf("Expected %v, got %v", e, a)
 	}
-	if e, a := pod, event.Object; !reflect.DeepEqual(e, a) {
+	if e, a := pod, event.Object; !api.Semantic.DeepDerivative(e, a) {
 		t.Errorf("Expected %v, got %v", e, a)
 	}
 
@@ -294,7 +294,7 @@ func TestWatchEtcdState(t *testing.T) {
 				{
 					Action: "create",
 					Node: &etcd.Node{
-						Value: string(runtime.EncodeOrDie(codec, &api.Endpoints{JSONBase: api.JSONBase{ID: "foo"}, Endpoints: []string{}})),
+						Value: string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []string{}})),
 					},
 				},
 			},
@@ -308,12 +308,12 @@ func TestWatchEtcdState(t *testing.T) {
 				{
 					Action: "compareAndSwap",
 					Node: &etcd.Node{
-						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{JSONBase: api.JSONBase{ID: "foo"}, Endpoints: []string{"127.0.0.1:9000"}})),
+						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []string{"127.0.0.1:9000"}})),
 						CreatedIndex:  1,
 						ModifiedIndex: 2,
 					},
 					PrevNode: &etcd.Node{
-						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{JSONBase: api.JSONBase{ID: "foo"}, Endpoints: []string{}})),
+						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []string{}})),
 						CreatedIndex:  1,
 						ModifiedIndex: 1,
 					},
@@ -330,7 +330,7 @@ func TestWatchEtcdState(t *testing.T) {
 					R: &etcd.Response{
 						Action: "get",
 						Node: &etcd.Node{
-							Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{JSONBase: api.JSONBase{ID: "foo"}, Endpoints: []string{}})),
+							Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []string{}})),
 							CreatedIndex:  1,
 							ModifiedIndex: 1,
 						},
@@ -343,12 +343,12 @@ func TestWatchEtcdState(t *testing.T) {
 				{
 					Action: "compareAndSwap",
 					Node: &etcd.Node{
-						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{JSONBase: api.JSONBase{ID: "foo"}, Endpoints: []string{"127.0.0.1:9000"}})),
+						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []string{"127.0.0.1:9000"}})),
 						CreatedIndex:  1,
 						ModifiedIndex: 2,
 					},
 					PrevNode: &etcd.Node{
-						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{JSONBase: api.JSONBase{ID: "foo"}, Endpoints: []string{}})),
+						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []string{}})),
 						CreatedIndex:  1,
 						ModifiedIndex: 1,
 					},
@@ -380,7 +380,7 @@ func TestWatchEtcdState(t *testing.T) {
 				t.Errorf("%s: expected type %v, got %v", k, e, a)
 				break
 			}
-			if e, a := testCase.Expected[i].Endpoints, event.Object.(*api.Endpoints).Endpoints; !reflect.DeepEqual(e, a) {
+			if e, a := testCase.Expected[i].Endpoints, event.Object.(*api.Endpoints).Endpoints; !api.Semantic.DeepDerivative(e, a) {
 				t.Errorf("%s: expected type %v, got %v", k, e, a)
 				break
 			}
@@ -391,11 +391,11 @@ func TestWatchEtcdState(t *testing.T) {
 
 func TestWatchFromZeroIndex(t *testing.T) {
 	codec := latest.Codec
-	pod := &api.Pod{JSONBase: api.JSONBase{ID: "foo"}}
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}
 
 	testCases := map[string]struct {
 		Response        EtcdResponseWithError
-		ExpectedVersion uint64
+		ExpectedVersion string
 		ExpectedType    watch.EventType
 	}{
 		"get value created": {
@@ -410,7 +410,7 @@ func TestWatchFromZeroIndex(t *testing.T) {
 					EtcdIndex: 2,
 				},
 			},
-			1,
+			"1",
 			watch.Added,
 		},
 		"get value modified": {
@@ -425,7 +425,7 @@ func TestWatchFromZeroIndex(t *testing.T) {
 					EtcdIndex: 3,
 				},
 			},
-			2,
+			"2",
 			watch.Modified,
 		},
 	}
@@ -452,10 +452,10 @@ func TestWatchFromZeroIndex(t *testing.T) {
 			t.Fatalf("%s: expected a pod, got %#v", k, event.Object)
 		}
 		if actualPod.ResourceVersion != testCase.ExpectedVersion {
-			t.Errorf("%s: expected pod with resource version %d, Got %#v", k, testCase.ExpectedVersion, actualPod)
+			t.Errorf("%s: expected pod with resource version %v, Got %#v", k, testCase.ExpectedVersion, actualPod)
 		}
 		pod.ResourceVersion = testCase.ExpectedVersion
-		if e, a := pod, event.Object; !reflect.DeepEqual(e, a) {
+		if e, a := pod, event.Object; !api.Semantic.DeepDerivative(e, a) {
 			t.Errorf("%s: expected %v, got %v", k, e, a)
 		}
 		watching.Stop()
@@ -464,7 +464,7 @@ func TestWatchFromZeroIndex(t *testing.T) {
 
 func TestWatchListFromZeroIndex(t *testing.T) {
 	codec := latest.Codec
-	pod := &api.Pod{JSONBase: api.JSONBase{ID: "foo"}}
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}
 
 	fakeClient := NewFakeEtcdClient(t)
 	fakeClient.Data["/some/key"] = EtcdResponseWithError{
@@ -510,16 +510,61 @@ func TestWatchListFromZeroIndex(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected a pod, got %#v", event.Object)
 		}
-		if actualPod.ResourceVersion != 1 {
+		if actualPod.ResourceVersion != "1" {
 			t.Errorf("Expected pod with resource version %d, Got %#v", 1, actualPod)
 		}
-		pod.ResourceVersion = 1
-		if e, a := pod, event.Object; !reflect.DeepEqual(e, a) {
+		pod.ResourceVersion = "1"
+		if e, a := pod, event.Object; !api.Semantic.DeepDerivative(e, a) {
 			t.Errorf("Expected %v, got %v", e, a)
 		}
 	}
 
 	fakeClient.WaitForWatchCompletion()
+	watching.Stop()
+}
+
+func TestWatchListIgnoresRootKey(t *testing.T) {
+	codec := latest.Codec
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}
+
+	fakeClient := NewFakeEtcdClient(t)
+	h := EtcdHelper{fakeClient, codec, versioner}
+
+	watching, err := h.WatchList("/some/key", 1, Everything)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	fakeClient.WaitForWatchCompletion()
+
+	// This is the root directory of the watch, which happens to have a value encoded
+	fakeClient.WatchResponse <- &etcd.Response{
+		Action: "delete",
+		PrevNode: &etcd.Node{
+			Key:           "/some/key",
+			Value:         runtime.EncodeOrDie(codec, pod),
+			CreatedIndex:  1,
+			ModifiedIndex: 1,
+		},
+	}
+	// Delete of the parent directory of a key is an event that a list watch would receive,
+	// but will have no value so the decode will fail.
+	fakeClient.WatchResponse <- &etcd.Response{
+		Action: "delete",
+		PrevNode: &etcd.Node{
+			Key:           "/some/key",
+			Value:         "",
+			CreatedIndex:  1,
+			ModifiedIndex: 1,
+		},
+	}
+	close(fakeClient.WatchStop)
+
+	// the existing node is detected and the index set
+	_, open := <-watching.ResultChan()
+	if open {
+		t.Fatalf("unexpected channel open")
+	}
+
 	watching.Stop()
 }
 
@@ -599,5 +644,40 @@ func TestWatchPurposefulShutdown(t *testing.T) {
 	}
 	if _, open := <-watching.ResultChan(); open {
 		t.Errorf("An injected error did not cause a graceful shutdown")
+	}
+}
+
+func TestEtcdParseWatchResourceVersion(t *testing.T) {
+	testCases := []struct {
+		Version       string
+		Kind          string
+		ExpectVersion uint64
+		Err           bool
+	}{
+		{Version: "", ExpectVersion: 0},
+		{Version: "a", Err: true},
+		{Version: " ", Err: true},
+		{Version: "1", ExpectVersion: 2},
+		{Version: "10", ExpectVersion: 11},
+	}
+	for _, testCase := range testCases {
+		version, err := ParseWatchResourceVersion(testCase.Version, testCase.Kind)
+		switch {
+		case testCase.Err:
+			if err == nil {
+				t.Errorf("%s: unexpected non-error", testCase.Version)
+				continue
+			}
+			if !errors.IsInvalid(err) {
+				t.Errorf("%s: unexpected error: %v", testCase.Version, err)
+				continue
+			}
+		case !testCase.Err && err != nil:
+			t.Errorf("%s: unexpected error: %v", testCase.Version, err)
+			continue
+		}
+		if version != testCase.ExpectVersion {
+			t.Errorf("%s: expected version %d but was %d", testCase.Version, testCase.ExpectVersion, version)
+		}
 	}
 }

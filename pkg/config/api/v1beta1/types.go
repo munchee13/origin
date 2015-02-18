@@ -1,25 +1,17 @@
 package v1beta1
 
 import (
-	kubeapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api/v1beta1"
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api/v1beta3"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
 
-// Config contains a set of Kubernetes resources to be applied.
-// TODO: Unify with Kubernetes Config
-//       https://github.com/GoogleCloudPlatform/kubernetes/pull/1007
+// Config contains a list of Kubernetes resources to be applied.
+// DEPRECATED: All clients should use Kubernetes api.List instead of Config.
 type Config struct {
-	kubeapi.JSONBase `json:",inline" yaml:",inline"`
-
-	// Required: Name identifies the Config.
-	Name string `json:"name" yaml:"name"`
-
-	// Optional: Description describes the Config.
-	Description string `json:"description" yaml:"description"`
+	kapi.TypeMeta   `json:",inline"`
+	kapi.ObjectMeta `json:"metadata,omitempty"`
 
 	// Required: Items is an array of Kubernetes resources of Service,
 	// Pod and/or ReplicationController kind.
-	// TODO: Handle unregistered types. Define custom []runtime.Object
-	//       type and its unmarshaller instead of []runtime.Object.
-	Items []runtime.RawExtension `json:"items" yaml:"items"`
+	Items []runtime.RawExtension `json:"items"`
 }

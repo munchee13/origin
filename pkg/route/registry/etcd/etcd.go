@@ -3,12 +3,20 @@ package etcd
 import (
 	"fmt"
 
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	etcderr "github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors/etcd"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
+	kubeetcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/etcd"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
+	ktools "github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 
 	"github.com/openshift/origin/pkg/route/api"
+)
+
+const (
+	// RoutePath is the path to route image in etcd
+	RoutePath string = "/routes"
 )
 
 // Etcd implements route.Registry backed by etcd.
@@ -23,14 +31,18 @@ func New(helper tools.EtcdHelper) *Etcd {
 	}
 }
 
-func makeRouteKey(id string) string {
-	return "/routes/" + id
+func makeRouteListKey(ctx kapi.Context) string {
+	return kubeetcd.MakeEtcdListKey(ctx, RoutePath)
+}
+
+func makeRouteKey(ctx kapi.Context, id string) (string, error) {
+	return kubeetcd.MakeEtcdItemKey(ctx, RoutePath, id)
 }
 
 // ListRoutes obtains a list of Routes.
-func (registry *Etcd) ListRoutes(selector labels.Selector) (*api.RouteList, error) {
+func (registry *Etcd) ListRoutes(ctx kapi.Context, selector labels.Selector) (*api.RouteList, error) {
 	allRoutes := api.RouteList{}
-	err := registry.ExtractList("/routes", &allRoutes.Items, &allRoutes.ResourceVersion)
+	err := registry.ExtractToList(makeRouteListKey(ctx), &allRoutes)
 	if err != nil {
 		return nil, err
 	}
@@ -46,9 +58,13 @@ func (registry *Etcd) ListRoutes(selector labels.Selector) (*api.RouteList, erro
 }
 
 // GetRoute gets a specific Route specified by its ID.
-func (registry *Etcd) GetRoute(routeID string) (*api.Route, error) {
+func (registry *Etcd) GetRoute(ctx kapi.Context, routeID string) (*api.Route, error) {
 	route := api.Route{}
-	err := registry.ExtractObj(makeRouteKey(routeID), &route, false)
+	key, err := makeRouteKey(ctx, routeID)
+	if err != nil {
+		return nil, err
+	}
+	err = registry.ExtractObj(key, &route, false)
 	if err != nil {
 		return nil, etcderr.InterpretGetError(err, "route", routeID)
 	}
@@ -56,34 +72,57 @@ func (registry *Etcd) GetRoute(routeID string) (*api.Route, error) {
 }
 
 // CreateRoute creates a new Route.
-func (registry *Etcd) CreateRoute(route *api.Route) error {
-	err := registry.CreateObj(makeRouteKey(route.ID), route, 0)
-	return etcderr.InterpretCreateError(err, "route", route.ID)
+func (registry *Etcd) CreateRoute(ctx kapi.Context, route *api.Route) error {
+	key, err := makeRouteKey(ctx, route.Name)
+	if err != nil {
+		return err
+	}
+	err = registry.CreateObj(key, route, 0)
+	return etcderr.InterpretCreateError(err, "route", route.Name)
 }
 
 // UpdateRoute replaces an existing Route.
-func (registry *Etcd) UpdateRoute(route *api.Route) error {
-	err := registry.SetObj(makeRouteKey(route.ID), route)
-	return etcderr.InterpretUpdateError(err, "route", route.ID)
+func (registry *Etcd) UpdateRoute(ctx kapi.Context, route *api.Route) error {
+	key, err := makeRouteKey(ctx, route.Name)
+	if err != nil {
+		return err
+	}
+	err = registry.SetObj(key, route, 0)
+	return etcderr.InterpretUpdateError(err, "route", route.Name)
 }
 
 // DeleteRoute deletes a Route specified by its ID.
-func (registry *Etcd) DeleteRoute(routeID string) error {
-	key := makeRouteKey(routeID)
-	err := registry.Delete(key, true)
+func (registry *Etcd) DeleteRoute(ctx kapi.Context, routeID string) error {
+	key, err := makeRouteKey(ctx, routeID)
+	if err != nil {
+		return err
+	}
+	err = registry.Delete(key, true)
 	return etcderr.InterpretDeleteError(err, "route", routeID)
 }
 
 // WatchRoutes begins watching for new, changed, or deleted route configurations.
-func (registry *Etcd) WatchRoutes(label, field labels.Selector, resourceVersion uint64) (watch.Interface, error) {
+func (registry *Etcd) WatchRoutes(ctx kapi.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error) {
 	if !label.Empty() {
 		return nil, fmt.Errorf("label selectors are not supported on routes yet")
 	}
-	if value, found := field.RequiresExactMatch("ID"); found {
-		return registry.Watch(makeRouteKey(value), resourceVersion), nil
+
+	version, err := ktools.ParseWatchResourceVersion(resourceVersion, "pod")
+	if err != nil {
+		return nil, err
 	}
+
+	if value, found := field.RequiresExactMatch("ID"); found {
+		key, err := makeRouteKey(ctx, value)
+		if err != nil {
+			return nil, err
+		}
+		return registry.Watch(key, version), nil
+	}
+
 	if field.Empty() {
-		return registry.WatchList("/routes", resourceVersion, tools.Everything)
+		key := kubeetcd.MakeEtcdListKey(ctx, RoutePath)
+		return registry.WatchList(key, version, tools.Everything)
 	}
 	return nil, fmt.Errorf("only the 'ID' and default (everything) field selectors are supported")
 }

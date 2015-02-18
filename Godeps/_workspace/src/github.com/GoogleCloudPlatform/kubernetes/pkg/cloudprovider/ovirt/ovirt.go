@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"code.google.com/p/gcfg"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
 )
 
@@ -94,6 +95,10 @@ func newOVirtCloud(config io.Reader) (*OVirtCloud, error) {
 	return &OVirtCloud{VmsRequest: request}, nil
 }
 
+func (aws *OVirtCloud) Clusters() (cloudprovider.Clusters, bool) {
+	return nil, false
+}
+
 // TCPLoadBalancer returns an implementation of TCPLoadBalancer for oVirt cloud
 func (v *OVirtCloud) TCPLoadBalancer() (cloudprovider.TCPLoadBalancer, bool) {
 	return nil, false
@@ -112,7 +117,11 @@ func (v *OVirtCloud) Zones() (cloudprovider.Zones, bool) {
 // IPAddress returns the address of a particular machine instance
 func (v *OVirtCloud) IPAddress(instance string) (net.IP, error) {
 	// since the instance now is the IP in the ovirt env, this is trivial no-op
-	return net.ParseIP(instance), nil
+	ip, err := net.LookupIP(instance)
+	if err != nil || len(ip) < 1 {
+		return nil, fmt.Errorf("cannot find ip address for: %s", instance)
+	}
+	return ip[0], nil
 }
 
 func getInstancesFromXml(body io.Reader) ([]string, error) {
@@ -153,4 +162,8 @@ func (v *OVirtCloud) List(filter string) ([]string, error) {
 	defer response.Body.Close()
 
 	return getInstancesFromXml(response.Body)
+}
+
+func (v *OVirtCloud) GetNodeResources(name string) (*api.NodeResources, error) {
+	return nil, nil
 }

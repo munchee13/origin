@@ -2,13 +2,15 @@ package deployconfig
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
-	"time"
 
-	kubeapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	kclient "github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/openshift/origin/pkg/deploy/api"
+	deploytest "github.com/openshift/origin/pkg/deploy/api/test"
 	"github.com/openshift/origin/pkg/deploy/registry/test"
 )
 
@@ -20,7 +22,7 @@ func TestListDeploymentConfigsError(t *testing.T) {
 		registry: mockRegistry,
 	}
 
-	deploymentConfigs, err := storage.List(nil, nil, nil)
+	deploymentConfigs, err := storage.List(kapi.NewDefaultContext(), nil, nil)
 	if err != mockRegistry.Err {
 		t.Errorf("Expected %#v, Got %#v", mockRegistry.Err, err)
 	}
@@ -40,7 +42,7 @@ func TestListDeploymentConfigsEmptyList(t *testing.T) {
 		registry: mockRegistry,
 	}
 
-	deploymentConfigs, err := storage.List(nil, labels.Everything(), labels.Everything())
+	deploymentConfigs, err := storage.List(kapi.NewDefaultContext(), labels.Everything(), labels.Everything())
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
@@ -55,13 +57,13 @@ func TestListDeploymentConfigsPopulatedList(t *testing.T) {
 	mockRegistry.DeploymentConfigs = &api.DeploymentConfigList{
 		Items: []api.DeploymentConfig{
 			{
-				JSONBase: kubeapi.JSONBase{
-					ID: "foo",
+				ObjectMeta: kapi.ObjectMeta{
+					Name: "foo",
 				},
 			},
 			{
-				JSONBase: kubeapi.JSONBase{
-					ID: "bar",
+				ObjectMeta: kapi.ObjectMeta{
+					Name: "bar",
 				},
 			},
 		},
@@ -71,7 +73,7 @@ func TestListDeploymentConfigsPopulatedList(t *testing.T) {
 		registry: mockRegistry,
 	}
 
-	list, err := storage.List(nil, labels.Everything(), labels.Everything())
+	list, err := storage.List(kapi.NewDefaultContext(), labels.Everything(), labels.Everything())
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
@@ -86,9 +88,9 @@ func TestListDeploymentConfigsPopulatedList(t *testing.T) {
 func TestCreateDeploymentConfigBadObject(t *testing.T) {
 	storage := REST{}
 
-	channel, err := storage.Create(nil, &api.DeploymentList{})
-	if channel != nil {
-		t.Errorf("Expected nil, got %v", channel)
+	obj, err := storage.Create(kapi.NewDefaultContext(), &api.DeploymentList{})
+	if obj != nil {
+		t.Errorf("Expected nil, got %v", obj)
 	}
 	if strings.Index(err.Error(), "not a deploymentConfig") == -1 {
 		t.Errorf("Expected 'not a deploymentConfig' error, got '%v'", err.Error())
@@ -100,28 +102,15 @@ func TestCreateRegistrySaveError(t *testing.T) {
 	mockRegistry.Err = fmt.Errorf("test error")
 	storage := REST{registry: mockRegistry}
 
-	channel, err := storage.Create(nil, &api.DeploymentConfig{
-		JSONBase: kubeapi.JSONBase{ID: "foo"},
+	_, err := storage.Create(kapi.NewDefaultContext(), &api.DeploymentConfig{
+		ObjectMeta: kapi.ObjectMeta{Name: "foo"},
+		Template: api.DeploymentTemplate{
+			Strategy:           deploytest.OkStrategy(),
+			ControllerTemplate: deploytest.OkControllerTemplate(),
+		},
 	})
-	if channel == nil {
-		t.Errorf("Expected nil channel, got %v", channel)
-	}
-	if err != nil {
-		t.Errorf("Unexpected non-nil error: %#v", err)
-	}
-
-	select {
-	case result := <-channel:
-		status, ok := result.(*kubeapi.Status)
-		if !ok {
-			t.Errorf("Expected status type, got: %#v", result)
-		}
-		if status.Status != kubeapi.StatusFailure || status.Message != "foo" {
-			t.Errorf("Expected failure status, got %#V", status)
-		}
-	case <-time.After(50 * time.Millisecond):
-		t.Errorf("Timed out waiting for result")
-	default:
+	if err != mockRegistry.Err {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
@@ -129,28 +118,26 @@ func TestCreateDeploymentConfigOK(t *testing.T) {
 	mockRegistry := test.NewDeploymentConfigRegistry()
 	storage := REST{registry: mockRegistry}
 
-	channel, err := storage.Create(nil, &api.DeploymentConfig{
-		JSONBase: kubeapi.JSONBase{ID: "foo"},
+	obj, err := storage.Create(kapi.NewDefaultContext(), &api.DeploymentConfig{
+		ObjectMeta: kapi.ObjectMeta{Name: "foo"},
+		Template: api.DeploymentTemplate{
+			Strategy:           deploytest.OkStrategy(),
+			ControllerTemplate: deploytest.OkControllerTemplate(),
+		},
 	})
-	if channel == nil {
-		t.Errorf("Expected nil channel, got %v", channel)
+	if obj == nil {
+		t.Errorf("Expected nil obj, got %v", obj)
 	}
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
 
-	select {
-	case result := <-channel:
-		deploymentConfig, ok := result.(*api.DeploymentConfig)
-		if !ok {
-			t.Errorf("Expected deploymentConfig type, got: %#v", result)
-		}
-		if deploymentConfig.ID != "foo" {
-			t.Errorf("Unexpected deploymentConfig: %#v", deploymentConfig)
-		}
-	case <-time.After(50 * time.Millisecond):
-		t.Errorf("Timed out waiting for result")
-	default:
+	deploymentConfig, ok := obj.(*api.DeploymentConfig)
+	if !ok {
+		t.Errorf("Expected deploymentConfig type, got: %#v", obj)
+	}
+	if deploymentConfig.Name != "foo" {
+		t.Errorf("Unexpected deploymentConfig: %#v", deploymentConfig)
 	}
 }
 
@@ -159,7 +146,7 @@ func TestGetDeploymentConfigError(t *testing.T) {
 	mockRegistry.Err = fmt.Errorf("bad")
 	storage := REST{registry: mockRegistry}
 
-	deploymentConfig, err := storage.Get(nil, "foo")
+	deploymentConfig, err := storage.Get(kapi.NewDefaultContext(), "foo")
 	if deploymentConfig != nil {
 		t.Errorf("Unexpected non-nil deploymentConfig: %#v", deploymentConfig)
 	}
@@ -171,18 +158,18 @@ func TestGetDeploymentConfigError(t *testing.T) {
 func TestGetDeploymentConfigOK(t *testing.T) {
 	mockRegistry := test.NewDeploymentConfigRegistry()
 	mockRegistry.DeploymentConfig = &api.DeploymentConfig{
-		JSONBase: kubeapi.JSONBase{ID: "foo"},
+		ObjectMeta: kapi.ObjectMeta{Name: "foo"},
 	}
 	storage := REST{registry: mockRegistry}
 
-	deploymentConfig, err := storage.Get(nil, "foo")
+	deploymentConfig, err := storage.Get(kapi.NewDefaultContext(), "foo")
 	if deploymentConfig == nil {
 		t.Error("Unexpected nil deploymentConfig")
 	}
 	if err != nil {
 		t.Errorf("Unexpected non-nil error", err)
 	}
-	if deploymentConfig.(*api.DeploymentConfig).ID != "foo" {
+	if deploymentConfig.(*api.DeploymentConfig).Name != "foo" {
 		t.Errorf("Unexpected deploymentConfig: %#v", deploymentConfig)
 	}
 }
@@ -190,9 +177,9 @@ func TestGetDeploymentConfigOK(t *testing.T) {
 func TestUpdateDeploymentConfigBadObject(t *testing.T) {
 	storage := REST{}
 
-	channel, err := storage.Update(nil, &api.DeploymentList{})
-	if channel != nil {
-		t.Errorf("Expected nil, got %v", channel)
+	obj, created, err := storage.Update(kapi.NewDefaultContext(), &api.DeploymentList{})
+	if obj != nil || created {
+		t.Errorf("Expected nil, got %v", obj)
 	}
 	if strings.Index(err.Error(), "not a deploymentConfig:") == -1 {
 		t.Errorf("Expected 'not a deploymentConfig' error, got %v", err)
@@ -202,9 +189,9 @@ func TestUpdateDeploymentConfigBadObject(t *testing.T) {
 func TestUpdateDeploymentConfigMissingID(t *testing.T) {
 	storage := REST{}
 
-	channel, err := storage.Update(nil, &api.DeploymentConfig{})
-	if channel != nil {
-		t.Errorf("Expected nil, got %v", channel)
+	obj, created, err := storage.Update(kapi.NewDefaultContext(), &api.DeploymentConfig{})
+	if obj != nil || created {
+		t.Errorf("Expected nil, got %v", obj)
 	}
 	if strings.Index(err.Error(), "id is unspecified:") == -1 {
 		t.Errorf("Expected 'id is unspecified' error, got %v", err)
@@ -216,19 +203,11 @@ func TestUpdateRegistryErrorSaving(t *testing.T) {
 	mockRepositoryRegistry.Err = fmt.Errorf("foo")
 	storage := REST{registry: mockRepositoryRegistry}
 
-	channel, err := storage.Update(nil, &api.DeploymentConfig{
-		JSONBase: kubeapi.JSONBase{ID: "bar"},
+	_, _, err := storage.Update(kapi.NewDefaultContext(), &api.DeploymentConfig{
+		ObjectMeta: kapi.ObjectMeta{Name: "bar"},
 	})
-	if err != nil {
-		t.Errorf("Unexpected non-nil error: %#v", err)
-	}
-	result := <-channel
-	status, ok := result.(*kubeapi.Status)
-	if !ok {
-		t.Errorf("Expected status, got %#v", result)
-	}
-	if status.Status != kubeapi.StatusFailure || status.Message != "foo" {
-		t.Errorf("Expected status=failure, message=foo, got %#v", status)
+	if err != mockRepositoryRegistry.Err {
+		t.Errorf("Unexpected error: %#v", err)
 	}
 }
 
@@ -236,18 +215,17 @@ func TestUpdateDeploymentConfigOK(t *testing.T) {
 	mockRepositoryRegistry := test.NewDeploymentConfigRegistry()
 	storage := REST{registry: mockRepositoryRegistry}
 
-	channel, err := storage.Update(nil, &api.DeploymentConfig{
-		JSONBase: kubeapi.JSONBase{ID: "bar"},
+	obj, created, err := storage.Update(kapi.NewDefaultContext(), &api.DeploymentConfig{
+		ObjectMeta: kapi.ObjectMeta{Name: "bar"},
 	})
-	if err != nil {
+	if err != nil || created {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
-	result := <-channel
-	repo, ok := result.(*api.DeploymentConfig)
+	repo, ok := obj.(*api.DeploymentConfig)
 	if !ok {
-		t.Errorf("Expected DeploymentConfig, got %#v", result)
+		t.Errorf("Expected DeploymentConfig, got %#v", obj)
 	}
-	if repo.ID != "bar" {
+	if repo.Name != "bar" {
 		t.Errorf("Unexpected repo returned: %#v", repo)
 	}
 }
@@ -255,25 +233,67 @@ func TestUpdateDeploymentConfigOK(t *testing.T) {
 func TestDeleteDeploymentConfig(t *testing.T) {
 	mockRegistry := test.NewDeploymentConfigRegistry()
 	storage := REST{registry: mockRegistry}
-	channel, err := storage.Delete(nil, "foo")
-	if channel == nil {
-		t.Error("Unexpected nil channel")
+	obj, err := storage.Delete(kapi.NewDefaultContext(), "foo")
+	if obj == nil {
+		t.Error("Unexpected nil obj")
 	}
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
 
-	select {
-	case result := <-channel:
-		status, ok := result.(*kubeapi.Status)
-		if !ok {
-			t.Errorf("Expected status type, got: %#v", result)
-		}
-		if status.Status != kubeapi.StatusSuccess {
-			t.Errorf("Expected status=success, got: %#v", status)
-		}
-	case <-time.After(50 * time.Millisecond):
-		t.Errorf("Timed out waiting for result")
-	default:
+	status, ok := obj.(*kapi.Status)
+	if !ok {
+		t.Errorf("Expected status type, got: %#v", obj)
 	}
+	if status.Status != kapi.StatusSuccess {
+		t.Errorf("Expected status=success, got: %#v", status)
+	}
+}
+
+func TestCreateDeploymentConfigConflictingNamespace(t *testing.T) {
+	storage := REST{}
+
+	obj, err := storage.Create(kapi.WithNamespace(kapi.NewContext(), "legal-name"), &api.DeploymentConfig{
+		ObjectMeta: kapi.ObjectMeta{Name: "foo", Namespace: "some-value"},
+	})
+
+	if obj != nil {
+		t.Error("Expected a nil obj, but we got a value")
+	}
+
+	checkExpectedNamespaceError(t, err)
+}
+
+func TestUpdateDeploymentConfigConflictingNamespace(t *testing.T) {
+	mockRepositoryRegistry := test.NewDeploymentConfigRegistry()
+	storage := REST{registry: mockRepositoryRegistry}
+
+	obj, created, err := storage.Update(kapi.WithNamespace(kapi.NewContext(), "legal-name"), &api.DeploymentConfig{
+		ObjectMeta: kapi.ObjectMeta{Name: "bar", Namespace: "some-value"},
+	})
+
+	if obj != nil || created {
+		t.Error("Expected a nil obj, but we got a value")
+	}
+
+	checkExpectedNamespaceError(t, err)
+}
+
+func checkExpectedNamespaceError(t *testing.T, err error) {
+	expectedError := "DeploymentConfig.Namespace does not match the provided context"
+	if err == nil {
+		t.Errorf("Expected '" + expectedError + "', but we didn't get one")
+	} else {
+		e, ok := err.(kclient.APIStatus)
+		if !ok {
+			t.Errorf("error was not a statusError: %v", err)
+		}
+		if e.Status().Code != http.StatusConflict {
+			t.Errorf("Unexpected failure status: %v", e.Status())
+		}
+		if strings.Index(err.Error(), expectedError) == -1 {
+			t.Errorf("Expected '"+expectedError+"' error, got '%v'", err.Error())
+		}
+	}
+
 }

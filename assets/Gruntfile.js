@@ -7,6 +7,8 @@
 // use this if you want to recursively match all subfolders:
 // 'test/spec/**/*.js'
 
+var modRewrite = require('connect-modrewrite');
+
 module.exports = function (grunt) {
 
   // Load grunt tasks automatically
@@ -46,10 +48,10 @@ module.exports = function (grunt) {
         files: ['test/spec/{,*/}*.js'],
         tasks: ['newer:jshint:test', 'karma']
       },
-      compass: {
-        files: ['<%= yeoman.app %>/styles/{,*/}*.{scss,sass}'],
-        tasks: ['compass:server', 'autoprefixer']
-      },
+      css: {
+        files: '<%= yeoman.app %>/styles/*.less',
+        tasks: ['less']
+      },      
       gruntfile: {
         files: ['Gruntfile.js']
       },
@@ -68,9 +70,10 @@ module.exports = function (grunt) {
     // The actual grunt server settings
     connect: {
       options: {
-        port: 9000,
+        protocol: grunt.option('scheme') || 'https',
+        port: grunt.option('port') || 9000,
         // Change this to '0.0.0.0' to access the server from outside.
-        hostname: 'localhost',
+        hostname: grunt.option('hostname') || 'localhost',
         livereload: 35729
       },
       livereload: {
@@ -78,6 +81,7 @@ module.exports = function (grunt) {
           open: true,
           middleware: function (connect) {
             return [
+              modRewrite(['!^/(config.js|favicon.ico|(bower_components|scripts|images|styles|views)(/.*)?)$ /index.html [L]']),
               connect.static('.tmp'),
               connect().use(
                 '/bower_components',
@@ -166,39 +170,34 @@ module.exports = function (grunt) {
     wiredep: {
       app: {
         src: ['<%= yeoman.app %>/index.html'],
-        ignorePath:  /\.\.\//
-      },
-      sass: {
-        src: ['<%= yeoman.app %>/styles/{,*/}*.{scss,sass}'],
-        ignorePath: /(\.\.\/){1,2}bower_components\//
+        ignorePath:  /\.\.\//,
+        exclude: [
+          'bower_components/uri.js/src/IPv6.js',
+          'bower_components/uri.js/src/SecondLevelDomains.js',
+          'bower_components/uri.js/src/punycode.js',
+          'bower_components/uri.js/src/URI.min.js',
+          'bower_components/uri.js/src/jquery.URI.min.js',
+          'bower_components/uri.js/src/URI.fragmentQuery.js'
+        ]
       }
     },
 
-    // Compiles Sass to CSS and generates necessary files if requested
-    compass: {
-      options: {
-        sassDir: '<%= yeoman.app %>/styles',
-        cssDir: '.tmp/styles',
-        generatedImagesDir: '.tmp/images/generated',
-        imagesDir: '<%= yeoman.app %>/images',
-        javascriptsDir: '<%= yeoman.app %>/scripts',
-        fontsDir: '<%= yeoman.app %>/styles/fonts',
-        importPath: './bower_components',
-        httpImagesPath: '/images',
-        httpGeneratedImagesPath: '/images/generated',
-        httpFontsPath: '/styles/fonts',
-        relativeAssets: false,
-        assetCacheBuster: false,
-        raw: 'Sass::Script::Number.precision = 10\n'
-      },
-      dist: {
+    less: {
+      development: {
+        files: {
+          '.tmp/styles/main.css': '<%= yeoman.app %>/styles/main.less'
+        },
         options: {
-          generatedImagesDir: '<%= yeoman.dist %>/images/generated'
+          paths: ['<%= yeoman.app %>/styles']
         }
       },
-      server: {
+      production: {
+        files: {
+          'dist/css/main.css': '<%= yeoman.app %>/styles/main.less'
+        },
         options: {
-          debugInfo: true
+          cleancss: true,
+          paths: ['<%= yeoman.app %>/styles']
         }
       }
     },
@@ -230,7 +229,34 @@ module.exports = function (grunt) {
               js: ['concat', 'uglifyjs'],
               css: ['cssmin']
             },
-            post: {}
+            post: {
+              css: [{
+                name:'cssmin',
+                createConfig: function(context, block) {
+                  var generated = context.options.generated;
+                  generated.options = {
+                    keepBreaks: true,
+                  };
+                }
+              }],
+
+              js: [{
+                name:'uglify',
+                createConfig: function(context, block) {
+                  var generated = context.options.generated;
+                  generated.options = {
+                    compress: true,
+                    mangle: true,
+                    beautify: {
+                      beautify: true,
+                      indent_level: 0, // Don't waste characters indenting
+                      space_colon: false, // Don't waste characters 
+                      width: 1000,
+                    },
+                  };
+                }
+              }]
+            }
           }
         }
       }
@@ -296,9 +322,11 @@ module.exports = function (grunt) {
     htmlmin: {
       dist: {
         options: {
+          preserveLineBreaks: true,
           collapseWhitespace: true,
-          conservativeCollapse: true,
+          conservativeCollapse: false,
           collapseBooleanAttributes: true,
+          removeComments: true,
           removeCommentsFromCDATA: true,
           removeOptionalTags: true
         },
@@ -345,7 +373,8 @@ module.exports = function (grunt) {
             '*.html',
             'views/{,*/}*.html',
             'images/{,*/}*.{webp}',
-            'fonts/*'
+            'fonts/*',
+            'styles/fonts/*'
           ]
         }, {
           expand: true,
@@ -354,29 +383,47 @@ module.exports = function (grunt) {
           src: ['generated/*']
         }, {
           expand: true,
-          cwd: '.',
-          src: 'bower_components/bootstrap-sass-official/assets/fonts/bootstrap/*',
-          dest: '<%= yeoman.dist %>'
+          cwd: 'bower_components/patternfly/dist',
+          src: 'fonts/*',
+          dest: '<%= yeoman.dist %>/styles'
+        }, {
+          expand: true,
+          cwd: 'bower_components/patternfly/components/font-awesome',
+          src: 'fonts/*',
+          dest: '<%= yeoman.dist %>/styles'
         }]
       },
       styles: {
-        expand: true,
-        cwd: '<%= yeoman.app %>/styles',
-        dest: '.tmp/styles/',
-        src: '{,*/}*.css'
+        files: [{
+          expand: true,
+          cwd: '<%= yeoman.app %>/styles',
+          dest: '.tmp/styles/',
+          src: '{,*/}*.css'
+        }, {
+          expand: true,
+          cwd: 'bower_components/patternfly/dist',
+          src: 'fonts/*',
+          dest: '.tmp/styles'
+        }, {
+          expand: true,
+          cwd: 'bower_components/patternfly/components/font-awesome',
+          src: 'fonts/*',
+          dest: '.tmp/styles'
+        }]
       }
     },
 
     // Run some tasks in parallel to speed up the build process
     concurrent: {
       server: [
-        'compass:server'
+        'less',
+        'copy:styles'
       ],
       test: [
-        'compass'
+        'less'
       ],
       dist: [
-        'compass:dist',
+        'less:production',
         'imagemin',
         'svgmin'
       ]
@@ -450,6 +497,7 @@ module.exports = function (grunt) {
     'ngAnnotate',
     'copy:dist',
     'cdnify',
+    'less',
     'cssmin',
     'uglify',
     'filerev',

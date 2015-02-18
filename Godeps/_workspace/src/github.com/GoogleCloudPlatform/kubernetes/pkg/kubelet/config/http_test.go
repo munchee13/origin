@@ -19,13 +19,16 @@ package config
 import (
 	"encoding/json"
 	"net/http/httptest"
-	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/v1beta1"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/errors"
 )
 
 func TestURLErrorNotExistNoUpdate(t *testing.T) {
@@ -40,7 +43,7 @@ func TestURLErrorNotExistNoUpdate(t *testing.T) {
 
 func TestExtractFromHttpBadness(t *testing.T) {
 	ch := make(chan interface{}, 1)
-	c := SourceURL{"http://localhost:49575/_not_found_", ch, nil}
+	c := sourceURL{"http://localhost:49575/_not_found_", ch, nil}
 	if err := c.extractFromURL(); err == nil {
 		t.Errorf("Expected error")
 	}
@@ -104,8 +107,9 @@ func TestExtractInvalidManifest(t *testing.T) {
 			ResponseBody: string(data),
 		}
 		testServer := httptest.NewServer(&fakeHandler)
+		defer testServer.Close()
 		ch := make(chan interface{}, 1)
-		c := SourceURL{testServer.URL, ch, nil}
+		c := sourceURL{testServer.URL, ch, nil}
 		if err := c.extractFromURL(); err == nil {
 			t.Errorf("%s: Expected error", testCase.desc)
 		}
@@ -119,38 +123,115 @@ func TestExtractFromHTTP(t *testing.T) {
 		expected  kubelet.PodUpdate
 	}{
 		{
-			desc:      "Single manifest",
-			manifests: api.ContainerManifest{Version: "v1beta1", ID: "foo"},
+			desc: "Single manifest",
+			manifests: v1beta1.ContainerManifest{Version: "v1beta1", ID: "foo", UUID: "111",
+				Containers: []v1beta1.Container{{Name: "1", Image: "foo", ImagePullPolicy: v1beta1.PullAlways}}},
 			expected: CreatePodUpdate(kubelet.SET,
-				kubelet.Pod{
-					Name: "foo",
-					Manifest: api.ContainerManifest{
-						Version:       "v1beta1",
-						ID:            "foo",
+				kubelet.HTTPSource,
+				api.BoundPod{
+					ObjectMeta: api.ObjectMeta{
+						UID:       "111",
+						Name:      "foo",
+						Namespace: "foobar",
+					},
+					Spec: api.PodSpec{
 						RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+						DNSPolicy:     api.DNSClusterFirst,
+						Containers: []api.Container{{
+							Name:  "1",
+							Image: "foo",
+							TerminationMessagePath: "/dev/termination-log",
+							ImagePullPolicy:        "Always"}},
+					},
+				}),
+		},
+		{
+			desc:      "Single manifest without ID",
+			manifests: api.ContainerManifest{Version: "v1beta1", UUID: "111"},
+			expected: CreatePodUpdate(kubelet.SET,
+				kubelet.HTTPSource,
+				api.BoundPod{
+					ObjectMeta: api.ObjectMeta{
+						UID:       "111",
+						Name:      "111",
+						Namespace: "foobar",
+					},
+					Spec: api.PodSpec{
+						RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+						DNSPolicy:     api.DNSClusterFirst,
+					},
+				}),
+		},
+		{
+			desc: "Single manifest with v1beta2",
+			manifests: v1beta1.ContainerManifest{Version: "v1beta2", ID: "foo", UUID: "111",
+				Containers: []v1beta1.Container{{Name: "1", Image: "foo", ImagePullPolicy: v1beta1.PullAlways}}},
+			expected: CreatePodUpdate(kubelet.SET,
+				kubelet.HTTPSource,
+				api.BoundPod{
+					ObjectMeta: api.ObjectMeta{
+						UID:       "111",
+						Name:      "foo",
+						Namespace: "foobar",
+					},
+					Spec: api.PodSpec{
+						RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+						DNSPolicy:     api.DNSClusterFirst,
+						Containers: []api.Container{{
+							Name:  "1",
+							Image: "foo",
+							TerminationMessagePath: "/dev/termination-log",
+							ImagePullPolicy:        "Always"}},
 					},
 				}),
 		},
 		{
 			desc: "Multiple manifests",
-			manifests: []api.ContainerManifest{
-				{Version: "v1beta1", ID: "", Containers: []api.Container{{Name: "1", Image: "foo"}}},
-				{Version: "v1beta1", ID: "bar", Containers: []api.Container{{Name: "1", Image: "foo"}}},
+			manifests: []v1beta1.ContainerManifest{
+				{Version: "v1beta1", ID: "foo", UUID: "111",
+					Containers: []v1beta1.Container{{Name: "1", Image: "foo", ImagePullPolicy: v1beta1.PullAlways}}},
+				{Version: "v1beta1", ID: "bar", UUID: "222",
+					Containers: []v1beta1.Container{{Name: "1", Image: "foo", ImagePullPolicy: ""}}},
 			},
 			expected: CreatePodUpdate(kubelet.SET,
-				kubelet.Pod{
-					Name:     "1",
-					Manifest: api.ContainerManifest{Version: "v1beta1", ID: "", Containers: []api.Container{{Name: "1", Image: "foo"}}},
+				kubelet.HTTPSource,
+				api.BoundPod{
+					ObjectMeta: api.ObjectMeta{
+						UID:       "111",
+						Name:      "foo",
+						Namespace: "foobar",
+					},
+					Spec: api.PodSpec{
+						RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+						DNSPolicy:     api.DNSClusterFirst,
+						Containers: []api.Container{{
+							Name:  "1",
+							Image: "foo",
+							TerminationMessagePath: "/dev/termination-log",
+							ImagePullPolicy:        "Always"}},
+					},
 				},
-				kubelet.Pod{
-					Name:     "bar",
-					Manifest: api.ContainerManifest{Version: "v1beta1", ID: "bar", Containers: []api.Container{{Name: "1", Image: "foo"}}},
+				api.BoundPod{
+					ObjectMeta: api.ObjectMeta{
+						UID:       "222",
+						Name:      "bar",
+						Namespace: "foobar",
+					},
+					Spec: api.PodSpec{
+						RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+						DNSPolicy:     api.DNSClusterFirst,
+						Containers: []api.Container{{
+							Name:  "1",
+							Image: "foo",
+							TerminationMessagePath: "/dev/termination-log",
+							ImagePullPolicy:        "IfNotPresent"}},
+					},
 				}),
 		},
 		{
 			desc:      "Empty Array",
-			manifests: []api.ContainerManifest{},
-			expected:  CreatePodUpdate(kubelet.SET),
+			manifests: []v1beta1.ContainerManifest{},
+			expected:  CreatePodUpdate(kubelet.SET, kubelet.HTTPSource),
 		},
 	}
 	for _, testCase := range testCases {
@@ -163,18 +244,29 @@ func TestExtractFromHTTP(t *testing.T) {
 			ResponseBody: string(data),
 		}
 		testServer := httptest.NewServer(&fakeHandler)
+		defer testServer.Close()
 		ch := make(chan interface{}, 1)
-		c := SourceURL{testServer.URL, ch, nil}
+		c := sourceURL{testServer.URL, ch, nil}
 		if err := c.extractFromURL(); err != nil {
 			t.Errorf("%s: Unexpected error: %v", testCase.desc, err)
+			continue
 		}
 		update := (<-ch).(kubelet.PodUpdate)
-		if !reflect.DeepEqual(testCase.expected, update) {
+
+		for i := range update.Pods {
+			// There's no way to provide namespace in ContainerManifest, so
+			// it will be defaulted.
+			if !strings.HasPrefix(update.Pods[i].ObjectMeta.Namespace, "url-") {
+				t.Errorf("Unexpected namespace: %s", update.Pods[0].ObjectMeta.Namespace)
+			}
+			update.Pods[i].ObjectMeta.Namespace = "foobar"
+		}
+		if !api.Semantic.DeepEqual(testCase.expected, update) {
 			t.Errorf("%s: Expected: %#v, Got: %#v", testCase.desc, testCase.expected, update)
 		}
 		for i := range update.Pods {
-			if errs := kubelet.ValidatePod(&update.Pods[i]); len(errs) != 0 {
-				t.Errorf("%s: Expected no validation errors on %#v, Got %#v", testCase.desc, update.Pods[i], errs)
+			if errs := validation.ValidateBoundPod(&update.Pods[i]); len(errs) != 0 {
+				t.Errorf("%s: Expected no validation errors on %#v, Got %v", testCase.desc, update.Pods[i], errors.NewAggregate(errs))
 			}
 		}
 	}

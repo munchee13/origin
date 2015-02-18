@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/fsouza/go-dockerclient"
 )
 
@@ -29,17 +30,27 @@ type FakeDockerClient struct {
 	sync.Mutex
 	ContainerList []docker.APIContainers
 	Container     *docker.Container
+	ContainerMap  map[string]*docker.Container
+	Image         *docker.Image
+	Images        []docker.APIImages
 	Err           error
 	called        []string
 	Stopped       []string
 	pulled        []string
 	Created       []string
+	Removed       []string
+	RemovedImages util.StringSet
+	VersionInfo   docker.Env
 }
 
-func (f *FakeDockerClient) clearCalls() {
+func (f *FakeDockerClient) ClearCalls() {
 	f.Lock()
 	defer f.Unlock()
 	f.called = []string{}
+	f.Stopped = []string{}
+	f.pulled = []string{}
+	f.Created = []string{}
+	f.Removed = []string{}
 }
 
 func (f *FakeDockerClient) AssertCalls(calls []string) (err error) {
@@ -67,8 +78,22 @@ func (f *FakeDockerClient) ListContainers(options docker.ListContainersOptions) 
 func (f *FakeDockerClient) InspectContainer(id string) (*docker.Container, error) {
 	f.Lock()
 	defer f.Unlock()
-	f.called = append(f.called, "inspect")
+	f.called = append(f.called, "inspect_container")
+	if f.ContainerMap != nil {
+		if container, ok := f.ContainerMap[id]; ok {
+			return container, f.Err
+		}
+	}
 	return f.Container, f.Err
+}
+
+// InspectImage is a test-spy implementation of DockerInterface.InspectImage.
+// It adds an entry "inspect" to the internal method call record.
+func (f *FakeDockerClient) InspectImage(name string) (*docker.Image, error) {
+	f.Lock()
+	defer f.Unlock()
+	f.called = append(f.called, "inspect_image")
+	return f.Image, f.Err
 }
 
 // CreateContainer is a test-spy implementation of DockerInterface.CreateContainer.
@@ -91,6 +116,12 @@ func (f *FakeDockerClient) StartContainer(id string, hostConfig *docker.HostConf
 	f.Lock()
 	defer f.Unlock()
 	f.called = append(f.called, "start")
+	f.Container = &docker.Container{
+		ID:         id,
+		Config:     &docker.Config{Image: "testimage"},
+		HostConfig: hostConfig,
+		State:      docker.State{Running: true},
+	}
 	return f.Err
 }
 
@@ -108,6 +139,14 @@ func (f *FakeDockerClient) StopContainer(id string, timeout uint) error {
 		}
 	}
 	f.ContainerList = newList
+	return f.Err
+}
+
+func (f *FakeDockerClient) RemoveContainer(opts docker.RemoveContainerOptions) error {
+	f.Lock()
+	defer f.Unlock()
+	f.called = append(f.called, "remove")
+	f.Removed = append(f.Removed, opts.ID)
 	return f.Err
 }
 
@@ -130,8 +169,25 @@ func (f *FakeDockerClient) PullImage(opts docker.PullImageOptions, auth docker.A
 	return f.Err
 }
 
-func (f *FakeDockerClient) InspectImage(name string) (*docker.Image, error) {
-	return nil, f.Err
+func (f *FakeDockerClient) Version() (*docker.Env, error) {
+	return &f.VersionInfo, nil
+}
+
+func (f *FakeDockerClient) CreateExec(_ docker.CreateExecOptions) (*docker.Exec, error) {
+	return &docker.Exec{"12345678"}, nil
+}
+
+func (f *FakeDockerClient) StartExec(_ string, _ docker.StartExecOptions) error {
+	return nil
+}
+
+func (f *FakeDockerClient) ListImages(opts docker.ListImagesOptions) ([]docker.APIImages, error) {
+	return f.Images, f.Err
+}
+
+func (f *FakeDockerClient) RemoveImage(image string) error {
+	f.RemovedImages.Insert(image)
+	return f.Err
 }
 
 // FakeDockerPuller is a stub implementation of DockerPuller.

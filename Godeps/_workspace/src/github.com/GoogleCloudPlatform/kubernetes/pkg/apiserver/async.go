@@ -28,15 +28,15 @@ type WorkFunc func() (result runtime.Object, err error)
 
 // MakeAsync takes a function and executes it, delivering the result in the way required
 // by RESTStorage's Update, Delete, and Create methods.
-func MakeAsync(fn WorkFunc) <-chan runtime.Object {
-	channel := make(chan runtime.Object)
+func MakeAsync(fn WorkFunc) <-chan RESTResult {
+	channel := make(chan RESTResult)
 	go func() {
 		defer util.HandleCrash()
 		obj, err := fn()
 		if err != nil {
-			channel <- errToAPIStatus(err)
+			channel <- RESTResult{Object: errToAPIStatus(err)}
 		} else {
-			channel <- obj
+			channel <- RESTResult{Object: obj}
 		}
 		// 'close' is used to signal that no further values will
 		// be written to the channel. Not strictly necessary, but

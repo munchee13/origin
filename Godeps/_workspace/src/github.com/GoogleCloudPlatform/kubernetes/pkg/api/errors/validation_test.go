@@ -17,34 +17,33 @@ limitations under the License.
 package errors
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 )
 
 func TestMakeFuncs(t *testing.T) {
 	testCases := []struct {
-		fn       func() ValidationError
+		fn       func() *ValidationError
 		expected ValidationErrorType
 	}{
 		{
-			func() ValidationError { return NewFieldInvalid("f", "v") },
+			func() *ValidationError { return NewFieldInvalid("f", "v", "d") },
 			ValidationErrorTypeInvalid,
 		},
 		{
-			func() ValidationError { return NewFieldNotSupported("f", "v") },
+			func() *ValidationError { return NewFieldNotSupported("f", "v") },
 			ValidationErrorTypeNotSupported,
 		},
 		{
-			func() ValidationError { return NewFieldDuplicate("f", "v") },
+			func() *ValidationError { return NewFieldDuplicate("f", "v") },
 			ValidationErrorTypeDuplicate,
 		},
 		{
-			func() ValidationError { return NewFieldNotFound("f", "v") },
+			func() *ValidationError { return NewFieldNotFound("f", "v") },
 			ValidationErrorTypeNotFound,
 		},
 		{
-			func() ValidationError { return NewFieldRequired("f", "v") },
+			func() *ValidationError { return NewFieldRequired("f", "v") },
 			ValidationErrorTypeRequired,
 		},
 	}
@@ -57,54 +56,46 @@ func TestMakeFuncs(t *testing.T) {
 	}
 }
 
-func TestValidationError(t *testing.T) {
-	s := NewFieldInvalid("foo", "bar").Error()
-	if !strings.Contains(s, "foo") || !strings.Contains(s, "bar") || !strings.Contains(s, ValueOf(ValidationErrorTypeInvalid)) {
-		t.Errorf("error message did not contain expected values, got %s", s)
-	}
-}
-
-func TestErrorList(t *testing.T) {
-	errList := ErrorList{}
-	if a := errList.ToError(); a != nil {
-		t.Errorf("unexpected non-nil error for empty list: %v", a)
-	}
-	if a := errorListInternal(errList).Error(); a != "" {
-		t.Errorf("expected empty string, got %v", a)
-	}
-	errList = append(errList, NewFieldInvalid("field", "value"))
-	// The fact that this compiles is the test.
-}
-
-func TestErrorListToError(t *testing.T) {
-	errList := ErrorList{}
-	err := errList.ToError()
-	if err != nil {
-		t.Errorf("expected nil, got %v", err)
-	}
-
-	testCases := []struct {
-		errs     ErrorList
-		expected string
-	}{
-		{ErrorList{fmt.Errorf("abc")}, "abc"},
-		{ErrorList{fmt.Errorf("abc"), fmt.Errorf("123")}, "abc; 123"},
-	}
-	for _, testCase := range testCases {
-		err := testCase.errs.ToError()
-		if err == nil {
-			t.Errorf("expected an error, got nil: ErrorList=%v", testCase)
-			continue
+func TestValidationErrorUsefulMessage(t *testing.T) {
+	s := NewFieldInvalid("foo", "bar", "deet").Error()
+	t.Logf("message: %v", s)
+	for _, part := range []string{"foo", "bar", "deet", ValidationErrorTypeInvalid.String()} {
+		if !strings.Contains(s, part) {
+			t.Errorf("error message did not contain expected part '%v'", part)
 		}
-		if err.Error() != testCase.expected {
-			t.Errorf("expected %q, got %q", testCase.expected, err.Error())
+	}
+
+	type complicated struct {
+		Baz   int
+		Qux   string
+		Inner interface{}
+		KV    map[string]int
+	}
+	s = NewFieldInvalid(
+		"foo",
+		&complicated{
+			Baz:   1,
+			Qux:   "aoeu",
+			Inner: &complicated{Qux: "asdf"},
+			KV:    map[string]int{"Billy": 2},
+		},
+		"detail",
+	).Error()
+	t.Logf("message: %v", s)
+	for _, part := range []string{
+		"foo", ValidationErrorTypeInvalid.String(),
+		"Baz", "Qux", "Inner", "KV", "detail",
+		"1", "aoeu", "asdf", "Billy", "2",
+	} {
+		if !strings.Contains(s, part) {
+			t.Errorf("error message did not contain expected part '%v'", part)
 		}
 	}
 }
 
 func TestErrListPrefix(t *testing.T) {
 	testCases := []struct {
-		Err      ValidationError
+		Err      *ValidationError
 		Expected string
 	}{
 		{
@@ -112,7 +103,7 @@ func TestErrListPrefix(t *testing.T) {
 			"foo[0].bar",
 		},
 		{
-			NewFieldInvalid("field", "value"),
+			NewFieldInvalid("field", "value", ""),
 			"foo.field",
 		},
 		{
@@ -121,12 +112,12 @@ func TestErrListPrefix(t *testing.T) {
 		},
 	}
 	for _, testCase := range testCases {
-		errList := ErrorList{testCase.Err}
+		errList := ValidationErrorList{testCase.Err}
 		prefix := errList.Prefix("foo")
 		if prefix == nil || len(prefix) != len(errList) {
 			t.Errorf("Prefix should return self")
 		}
-		if e, a := testCase.Expected, errList[0].(ValidationError).Field; e != a {
+		if e, a := testCase.Expected, errList[0].(*ValidationError).Field; e != a {
 			t.Errorf("expected %s, got %s", e, a)
 		}
 	}
@@ -134,7 +125,7 @@ func TestErrListPrefix(t *testing.T) {
 
 func TestErrListPrefixIndex(t *testing.T) {
 	testCases := []struct {
-		Err      ValidationError
+		Err      *ValidationError
 		Expected string
 	}{
 		{
@@ -142,7 +133,7 @@ func TestErrListPrefixIndex(t *testing.T) {
 			"[1][0].bar",
 		},
 		{
-			NewFieldInvalid("field", "value"),
+			NewFieldInvalid("field", "value", ""),
 			"[1].field",
 		},
 		{
@@ -151,12 +142,12 @@ func TestErrListPrefixIndex(t *testing.T) {
 		},
 	}
 	for _, testCase := range testCases {
-		errList := ErrorList{testCase.Err}
+		errList := ValidationErrorList{testCase.Err}
 		prefix := errList.PrefixIndex(1)
 		if prefix == nil || len(prefix) != len(errList) {
 			t.Errorf("PrefixIndex should return self")
 		}
-		if e, a := testCase.Expected, errList[0].(ValidationError).Field; e != a {
+		if e, a := testCase.Expected, errList[0].(*ValidationError).Field; e != a {
 			t.Errorf("expected %s, got %s", e, a)
 		}
 	}
